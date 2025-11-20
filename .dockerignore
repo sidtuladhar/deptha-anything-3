@@ -41,7 +41,6 @@ test_*.py
 
 # Local files
 stream_depth.py
-viewer.html
 *.ipynb
 .pytest_cache/
 .coverage
