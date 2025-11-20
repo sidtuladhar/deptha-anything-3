@@ -32,6 +32,7 @@ Then open `viewer_cloud.html` in your browser and click "Start Webcam".
 #### Option A: Using Runpod Docker Template
 
 1. Push your image to Docker Hub:
+
 ```bash
 docker tag depth-streaming:latest your-dockerhub-username/depth-streaming:latest
 docker push your-dockerhub-username/depth-streaming:latest
@@ -58,8 +59,9 @@ docker push your-dockerhub-username/depth-streaming:latest
 1. Get your pod's public URL from Runpod (e.g., `https://abc123-8765.proxy.runpod.net`)
 
 2. Update `viewer_cloud.html` line 25 with your Runpod URL:
+
 ```javascript
-const WS_URL = 'wss://abc123-8765.proxy.runpod.net';
+const WS_URL = "wss://abc123-8765.proxy.runpod.net";
 ```
 
 3. Host `viewer_cloud.html` somewhere (GitHub Pages, Netlify, Vercel, etc.) or open it locally
@@ -83,11 +85,13 @@ Options:
 ### Performance Tuning
 
 **For faster processing:**
+
 - Use `--model small` (default, fastest)
 - Ensure GPU is being used (check logs for "Using device: cuda")
 - Lower webcam resolution in `viewer_cloud.html` (line 284)
 
 **For higher quality:**
+
 - Use `--model base` (slower but better quality)
 - Increase resolution in viewer (but will be slower)
 
@@ -95,7 +99,7 @@ Options:
 
 ### WebSocket Connection Fails
 
-1. Check Runpod exposes port 8765
+1. Check Runpod exposes port 8000
 2. Update viewer with correct WSS URL (note: `wss://` not `ws://` for HTTPS)
 3. Check firewall settings
 
@@ -121,11 +125,13 @@ Options:
 ## Monitoring
 
 Check docker logs:
+
 ```bash
 docker logs <container-id>
 ```
 
 You should see:
+
 - "✅ Model loaded successfully!"
 - "🌐 Starting WebSocket server on 0.0.0.0:8765"
 - "👤 Client XXX connected" when users connect
@@ -134,6 +140,7 @@ You should see:
 ## Multiple Users
 
 The server supports multiple concurrent users. Each user:
+
 - Has their own WebSocket connection
 - Sends their own webcam frames
 - Receives their own point clouds

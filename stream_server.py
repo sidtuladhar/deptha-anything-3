@@ -7,6 +7,7 @@ import json
 import base64
 import numpy as np
 import torch
+import msgpack
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
@@ -81,7 +82,7 @@ class CloudDepthServer:
         if rgb_image.shape[0] != h or rgb_image.shape[1] != w:
             rgb_image = np.array(pil_image.resize((w, h), Image.BILINEAR))
 
-        downsample = 2  # Adjust for performance
+        downsample = 3  # Adjust for performance (higher = fewer points, faster)
 
         # Create mesh grid
         xx, yy = np.meshgrid(np.arange(0, w, downsample), np.arange(0, h, downsample))
@@ -154,28 +155,34 @@ async def websocket_endpoint(websocket: WebSocket):
                     rgb_image = np.array(img)
 
                     # Process frame
-                    points, colors, intrinsics = depth_server.process_frame_to_pointcloud(rgb_image)
-
-                    # Send point cloud back to client
-                    response = json.dumps(
-                        {
-                            "type": "pointcloud",
-                            "timestamp": datetime.now().isoformat(),
-                            "num_points": len(points),
-                            "points": points.tolist(),
-                            "colors": colors.tolist(),
-                        }
+                    points, colors, intrinsics = depth_server.process_frame_to_pointcloud(
+                        rgb_image
                     )
 
-                    await websocket.send_text(response)
+                    # Send point cloud back to client using binary format (msgpack)
+                    # Convert numpy arrays to lists for msgpack compatibility
+                    response_data = {
+                        "type": "pointcloud",
+                        "timestamp": datetime.now().isoformat(),
+                        "num_points": len(points),
+                        "points": points.astype(np.float32).tobytes(),  # Send as raw bytes
+                        "colors": colors.astype(np.uint8).tobytes(),  # Send as raw bytes
+                    }
 
-                    print(f"📡 Processed frame for client {client_id}: {len(points)} points")
+                    # Pack with msgpack and send as binary
+                    binary_response = msgpack.packb(response_data, use_bin_type=True)
+                    await websocket.send_bytes(binary_response)
+
+                    print(
+                        f"📡 Processed frame for client {client_id}: {len(points)} points ({len(binary_response)/1024:.1f}KB)"
+                    )
 
             except json.JSONDecodeError:
                 print(f"❌ Invalid JSON from client {client_id}")
             except Exception as e:
                 print(f"❌ Error processing frame from client {client_id}: {e}")
                 import traceback
+
                 traceback.print_exc()
 
     except WebSocketDisconnect:

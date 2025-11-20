@@ -165,6 +165,9 @@
 
     <canvas id="frame-canvas" style="display: none;"></canvas>
 
+    <!-- MessagePack for binary decoding -->
+    <script src="https://cdn.jsdelivr.net/npm/msgpack-lite@0.1.26/dist/msgpack.min.js"></script>
+
     <script type="importmap">
       {
         "imports": {
@@ -320,25 +323,52 @@
 
           ws.onmessage = (event) => {
             try {
-              const data = JSON.parse(event.data);
+              let data;
 
-              if (data.type === "pointcloud") {
-                updatePointCloud(data);
-
-                // Update stats
-                frameCount++;
-                const now = Date.now();
-                if (now - lastTime >= 1000) {
-                  fps = frameCount;
-                  frameCount = 0;
-                  lastTime = now;
-                  fpsEl.textContent = fps;
-                }
+              // Handle both binary (msgpack) and text (JSON) messages
+              if (event.data instanceof Blob) {
+                // Binary message - convert Blob to ArrayBuffer
+                event.data.arrayBuffer().then((buffer) => {
+                  try {
+                    data = msgpack.decode(new Uint8Array(buffer));
+                    processPointCloudData(data);
+                  } catch (e) {
+                    console.error("Error decoding Blob:", e);
+                  }
+                });
+                return;
+              } else if (event.data instanceof ArrayBuffer) {
+                // Binary message - decode msgpack
+                data = msgpack.decode(new Uint8Array(event.data));
+              } else {
+                // Text message - parse JSON (fallback)
+                data = JSON.parse(event.data);
               }
+
+              processPointCloudData(data);
             } catch (e) {
               console.error("Error parsing message:", e);
             }
           };
+
+          function processPointCloudData(data) {
+            if (data.type === "pointcloud") {
+              updatePointCloud(data);
+
+              // Update stats
+              frameCount++;
+              const now = Date.now();
+              if (now - lastTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastTime = now;
+                fpsEl.textContent = fps;
+              }
+
+              // Ready for next frame
+              isProcessing = false;
+            }
+          }
 
           ws.onerror = (error) => {
             console.error("WebSocket error:", error);
@@ -365,13 +395,17 @@
         }
       }
 
+      let isProcessing = false;
+
       function startFrameCapture() {
         if (!stream || !ws || ws.readyState !== WebSocket.OPEN) return;
 
         isStreaming = true;
 
         function captureFrame() {
-          if (!isStreaming) return;
+          if (!isStreaming || isProcessing) return;
+
+          isProcessing = true;
 
           // Set canvas size to match video
           canvas.width = videoElement.videoWidth;
@@ -394,11 +428,15 @@
             ws.send(message);
           }
 
-          // Capture next frame (throttle to ~10 FPS sending)
-          setTimeout(captureFrame, 100);
+          // Will be triggered after receiving response
         }
 
-        captureFrame();
+        // Trigger frame capture
+        setInterval(() => {
+          if (!isProcessing && isStreaming) {
+            captureFrame();
+          }
+        }, 16); // Check every frame (60fps)
       }
 
       function updatePointCloud(data) {
@@ -410,31 +448,54 @@
           if (geometry) geometry.dispose();
         }
 
-        const points = data.points;
-        const colors = data.colors;
+        let positions, colorArray;
 
-        if (!points || points.length === 0) {
-          return;
+        // Check if data is in binary format (ArrayBuffer/Uint8Array) or array format
+        if (data.points instanceof Uint8Array || data.points instanceof ArrayBuffer) {
+          // Binary format - convert bytes to Float32Array
+          const pointsBuffer = data.points instanceof Uint8Array ? data.points : new Uint8Array(data.points);
+          const colorsBuffer = data.colors instanceof Uint8Array ? data.colors : new Uint8Array(data.colors);
+
+          positions = new Float32Array(pointsBuffer.buffer, pointsBuffer.byteOffset, pointsBuffer.byteLength / 4);
+
+          // Colors are uint8, convert to float32 and normalize
+          const numPoints = positions.length / 3;
+          colorArray = new Float32Array(numPoints * 3);
+          for (let i = 0; i < numPoints * 3; i++) {
+            colorArray[i] = colorsBuffer[i] / 255;
+          }
+
+          // Flip Z axis for depth
+          for (let i = 0; i < numPoints; i++) {
+            positions[i * 3 + 2] = -positions[i * 3 + 2];
+          }
+        } else {
+          // Array format (legacy JSON) - convert to Float32Array
+          const points = data.points;
+          const colors = data.colors;
+
+          if (!points || points.length === 0) {
+            return;
+          }
+
+          positions = new Float32Array(points.length * 3);
+          colorArray = new Float32Array(colors.length * 3);
+
+          for (let i = 0; i < points.length; i++) {
+            positions[i * 3] = points[i][0];
+            positions[i * 3 + 1] = points[i][1];
+            positions[i * 3 + 2] = -points[i][2]; // Flip Z for depth
+          }
+
+          for (let i = 0; i < colors.length; i++) {
+            colorArray[i * 3] = colors[i][0] / 255;
+            colorArray[i * 3 + 1] = colors[i][1] / 255;
+            colorArray[i * 3 + 2] = colors[i][2] / 255;
+          }
         }
 
         // Create new geometry
         geometry = new THREE.BufferGeometry();
-
-        // Convert points array to Float32Array
-        const positions = new Float32Array(points.length * 3);
-        const colorArray = new Float32Array(colors.length * 3);
-
-        for (let i = 0; i < points.length; i++) {
-          positions[i * 3] = points[i][0];
-          positions[i * 3 + 1] = points[i][1]; // Y axis
-          positions[i * 3 + 2] = -points[i][2]; // Flip Z for depth
-        }
-
-        for (let i = 0; i < colors.length; i++) {
-          colorArray[i * 3] = colors[i][0] / 255;
-          colorArray[i * 3 + 1] = colors[i][1] / 255;
-          colorArray[i * 3 + 2] = colors[i][2] / 255;
-        }
 
         geometry.setAttribute(
           "position",
@@ -457,7 +518,7 @@
         scene.add(pointCloud);
 
         // Update UI
-        pointCountEl.textContent = points.length.toLocaleString();
+        pointCountEl.textContent = data.num_points.toLocaleString();
 
         const latency = Date.now() - startTime;
         latencyEl.textContent = latency + "ms";
