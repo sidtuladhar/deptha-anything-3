@@ -80,11 +80,14 @@ class DepthProcessor(VideoStreamTrack):
 
     async def process_frames(self):
         """Actively consume and process frames with skipping"""
+        print(f"🎬 Starting process_frames loop")
         skipped = 0
         while True:
             try:
                 # Always consume frames to prevent queue buildup
+                print(f"⏳ Waiting for frame from track...")
                 frame = await self.track.recv()
+                print(f"✅ Received frame!")
 
                 # Skip if still processing
                 if self.is_processing:
