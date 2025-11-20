@@ -41,7 +41,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt || \
 # Copy project files
 COPY src/ ./src/
 COPY stream_server.py .
-COPY viewer_cloud.html .
+COPY viewer.html .
 
 # Add src to Python path so imports work
 ENV PYTHONPATH=/opt/depth-streaming/app/src:$PYTHONPATH
@@ -56,8 +56,8 @@ RUN sed -i 's/\r$//' /opt/depth-streaming/*.sh && chmod +x /opt/depth-streaming/
 # Default folders for RunPod mapping
 RUN mkdir -p /input /output
 
-# Expose WebSocket port
-EXPOSE 8765
+# Expose HTTP + WebSocket port
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

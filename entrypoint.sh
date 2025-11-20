@@ -20,7 +20,7 @@ python3 -c "import torch; print(f'âœ… PyTorch {torch.__version__}'); print(f'ðŸ–
 MODEL=${MODEL:-small}
 DEVICE=${DEVICE:-cuda}
 HOST=${HOST:-0.0.0.0}
-PORT=${PORT:-8765}
+PORT=${PORT:-8000}
 
 echo ""
 echo "Configuration:"

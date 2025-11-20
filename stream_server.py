@@ -1,18 +1,20 @@
 """
 Cloud-based depth streaming server for Runpod
-Receives webcam frames from browser clients and sends back point clouds
+Serves viewer.html via HTTP and handles WebSocket connections for depth processing
 """
 
-import asyncio
-import websockets
 import json
 import base64
 import numpy as np
 import torch
 from io import BytesIO
 from PIL import Image
-from depth_anything_3.api import DepthAnything3
 from datetime import datetime
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+from depth_anything_3.api import DepthAnything3
 
 
 class CloudDepthServer:
@@ -115,62 +117,72 @@ class CloudDepthServer:
 
         return points, colors, intrinsics
 
-    async def handle_client(self, websocket):
-        """Handle WebSocket client connection"""
-        client_id = id(websocket)
-        self.clients.add(websocket)
-        print(f"👤 Client {client_id} connected. Total clients: {len(self.clients)}")
 
-        try:
-            async for message in websocket:
-                try:
-                    # Parse incoming message
-                    data = json.loads(message)
+# Create FastAPI app
+app = FastAPI(title="Depth Anything v3 Streaming Server")
 
-                    if data.get("type") == "frame":
-                        # Decode base64 image
-                        img_data = base64.b64decode(data["image"])
-                        img = Image.open(BytesIO(img_data))
-                        rgb_image = np.array(img)
+# Global server instance (will be initialized in main)
+depth_server = None
 
-                        # Process frame
-                        points, colors, intrinsics = self.process_frame_to_pointcloud(rgb_image)
 
-                        # Send point cloud back to client
-                        response = json.dumps(
-                            {
-                                "type": "pointcloud",
-                                "timestamp": datetime.now().isoformat(),
-                                "num_points": len(points),
-                                "points": points.tolist(),
-                                "colors": colors.tolist(),
-                            }
-                        )
+@app.get("/")
+async def serve_viewer():
+    """Serve the viewer.html file"""
+    return FileResponse("viewer.html")
 
-                        await websocket.send(response)
 
-                        print(f"📡 Processed frame for client {client_id}: {len(points)} points")
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Handle WebSocket connections for depth processing"""
+    await websocket.accept()
+    client_id = id(websocket)
+    depth_server.clients.add(websocket)
+    print(f"👤 Client {client_id} connected. Total clients: {len(depth_server.clients)}")
 
-                except json.JSONDecodeError:
-                    print(f"❌ Invalid JSON from client {client_id}")
-                except Exception as e:
-                    print(f"❌ Error processing frame from client {client_id}: {e}")
-                    import traceback
+    try:
+        while True:
+            # Receive message from client
+            message = await websocket.receive_text()
 
-                    traceback.print_exc()
+            try:
+                data = json.loads(message)
 
-        except websockets.exceptions.ConnectionClosed:
-            print(f"👤 Client {client_id} disconnected")
-        finally:
-            self.clients.remove(websocket)
-            print(f"👤 Total clients: {len(self.clients)}")
+                if data.get("type") == "frame":
+                    # Decode base64 image
+                    img_data = base64.b64decode(data["image"])
+                    img = Image.open(BytesIO(img_data))
+                    rgb_image = np.array(img)
 
-    async def start_server(self, host="0.0.0.0", port=8765):
-        """Start the WebSocket server"""
-        print(f"🌐 Starting WebSocket server on {host}:{port}")
-        async with websockets.serve(self.handle_client, host, port):
-            print("✅ Server ready! Waiting for connections...")
-            await asyncio.Future()  # Run forever
+                    # Process frame
+                    points, colors, intrinsics = depth_server.process_frame_to_pointcloud(rgb_image)
+
+                    # Send point cloud back to client
+                    response = json.dumps(
+                        {
+                            "type": "pointcloud",
+                            "timestamp": datetime.now().isoformat(),
+                            "num_points": len(points),
+                            "points": points.tolist(),
+                            "colors": colors.tolist(),
+                        }
+                    )
+
+                    await websocket.send_text(response)
+
+                    print(f"📡 Processed frame for client {client_id}: {len(points)} points")
+
+            except json.JSONDecodeError:
+                print(f"❌ Invalid JSON from client {client_id}")
+            except Exception as e:
+                print(f"❌ Error processing frame from client {client_id}: {e}")
+                import traceback
+                traceback.print_exc()
+
+    except WebSocketDisconnect:
+        print(f"👤 Client {client_id} disconnected")
+    finally:
+        depth_server.clients.discard(websocket)
+        print(f"👤 Total clients: {len(depth_server.clients)}")
 
 
 if __name__ == "__main__":
@@ -192,9 +204,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--host", default="0.0.0.0", help="Host to bind to (0.0.0.0 for all interfaces)"
     )
-    parser.add_argument("--port", type=int, default=8765, help="Port to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
 
     args = parser.parse_args()
 
-    server = CloudDepthServer(model_size=args.model, device=args.device)
-    asyncio.run(server.start_server(host=args.host, port=args.port))
+    # Initialize depth server
+    depth_server = CloudDepthServer(model_size=args.model, device=args.device)
+
+    print(f"🌐 Starting server on {args.host}:{args.port}")
+    print(f"📄 Viewer available at: http://{args.host}:{args.port}/")
+    print(f"🔌 WebSocket endpoint: ws://{args.host}:{args.port}/ws")
+
+    # Start FastAPI server with uvicorn
+    uvicorn.run(app, host=args.host, port=args.port)
