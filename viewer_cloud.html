@@ -179,7 +179,7 @@
         // Configuration - update this with your Runpod URL
         const WS_URL = window.location.hostname === 'localhost'
             ? 'ws://localhost:8765'
-            : `ws://${window.location.hostname}:8765`;
+            : `wss://${window.location.hostname}:8765`;  // Changed to wss:// for secure connection
 
         // WebSocket and webcam
         let ws = null;
