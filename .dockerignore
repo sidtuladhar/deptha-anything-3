@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md
+
+# Tests
+tests/
+test_*.py
+*_test.py
+
+# Local files
+stream_depth.py
+viewer.html
+*.ipynb
+.pytest_cache/
+.coverage
+
+# Temporary files
+temp/
+tmp/
+*.log
+*.tmp
