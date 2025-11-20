@@ -55,8 +55,13 @@ class DepthPointCloudStreamer:
 
     def process_frame_to_pointcloud(self, rgb_image):
         """Process a single frame to generate point cloud using DepthAnything v3"""
+        import time
+
+        t_start = time.time()
+
         # Convert numpy array to PIL Image
         pil_image = Image.fromarray(rgb_image)
+        t_convert = time.time()
 
         # Run DepthAnything v3 inference
         prediction = self.model.inference(
@@ -64,6 +69,7 @@ class DepthPointCloudStreamer:
             export_dir=None,  # We'll process in memory
             export_format=[],  # We'll use raw outputs (empty list instead of None)
         )
+        t_inference = time.time()
 
         # Get depth map and confidence (handle both tensor and numpy array)
         depth_map = prediction.depth[0]
@@ -100,6 +106,14 @@ class DepthPointCloudStreamer:
         # Get depth values
         z = depth_map[yy, xx]
 
+        # Keep only points closer than 20th percentile to focus on foreground
+        # depth_threshold = np.percentile(z, 30)
+        #
+        # depth_mask = z < depth_threshold
+        # xx = xx[depth_mask]
+        # yy = yy[depth_mask]
+        # z = z[depth_mask]
+
         # Filter by confidence if available
         if confidence is not None:
             conf_threshold = 0.5  # Adjust threshold as needed
@@ -112,6 +126,7 @@ class DepthPointCloudStreamer:
         # Calculate 3D coordinates using proper intrinsics
         x = (xx - cx) * z / fx
         y = -((yy - cy) * z / fy)  # Negate Y to flip vertically
+        t_coords = time.time()
 
         # Get colors - sample from aligned RGB image
         # Ensure indices are integers
@@ -125,18 +140,32 @@ class DepthPointCloudStreamer:
         else:
             # 2D meshgrids - need to flatten
             colors = rgb_image[yy_int.flatten(), xx_int.flatten()]
+        t_colors = time.time()
 
         # Stack into point cloud
         points = np.stack([x.flatten(), y.flatten(), z.flatten()], axis=-1)
         colors = colors.reshape(-1, 3)
+        t_stack = time.time()
+
+        # Print timing breakdown
+        total_time = t_stack - t_start
+        print(f"\n⏱️  Performance Breakdown (Total: {total_time*1000:.1f}ms):")
+        print(f"  📸 Image conversion:  {(t_convert - t_start)*1000:6.1f}ms")
+        print(
+            f"  🧠 Depth inference:   {(t_inference - t_convert)*1000:6.1f}ms ({(t_inference-t_convert)/total_time*100:.0f}%)"
+        )
+        print(f"  🔢 Extract data:      {(t_coords - t_inference)*1000:6.1f}ms")
+        print(f"  🎨 Get colors:        {(t_colors - t_coords)*1000:6.1f}ms")
+        print(f"  📊 Stack arrays:      {(t_stack - t_colors)*1000:6.1f}ms")
+        print(f"  → FPS potential:      {1/total_time:.1f}")
 
         return points, colors, intrinsics
 
     def capture_frames(self):
         """Capture frames from webcam"""
         cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 160)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 120)
 
         print("📸 Starting webcam capture...")
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Cloud-based depth streaming server for Runpod
 Receives webcam frames from browser clients and sends back point clouds
@@ -27,7 +26,6 @@ class CloudDepthServer:
             "base": "depth-anything/da3-base",
         }
 
-        # Initialize device (prefer CUDA for Runpod, fallback to CPU)
         if device == "cuda" and torch.cuda.is_available():
             self.device = torch.device("cuda")
         elif device == "mps" and torch.backends.mps.is_available():
@@ -37,15 +35,11 @@ class CloudDepthServer:
 
         print(f"🖥️  Using device: {self.device}")
 
-        # Initialize DepthAnything v3
-        self.model = DepthAnything3.from_pretrained(
-            model_map.get(model_size, model_map["small"])
-        )
+        self.model = DepthAnything3.from_pretrained(model_map.get(model_size, model_map["small"]))
         self.model = self.model.to(device=self.device)
 
         print("✅ Model loaded successfully!")
 
-        # Track connected clients
         self.clients = set()
 
     def process_frame_to_pointcloud(self, rgb_image):
@@ -140,9 +134,7 @@ class CloudDepthServer:
                         rgb_image = np.array(img)
 
                         # Process frame
-                        points, colors, intrinsics = self.process_frame_to_pointcloud(
-                            rgb_image
-                        )
+                        points, colors, intrinsics = self.process_frame_to_pointcloud(rgb_image)
 
                         # Send point cloud back to client
                         response = json.dumps(
@@ -157,9 +149,7 @@ class CloudDepthServer:
 
                         await websocket.send(response)
 
-                        print(
-                            f"📡 Processed frame for client {client_id}: {len(points)} points"
-                        )
+                        print(f"📡 Processed frame for client {client_id}: {len(points)} points")
 
                 except json.JSONDecodeError:
                     print(f"❌ Invalid JSON from client {client_id}")
@@ -186,9 +176,7 @@ class CloudDepthServer:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Cloud depth streaming server for Runpod"
-    )
+    parser = argparse.ArgumentParser(description="Cloud depth streaming server for Runpod")
     parser.add_argument(
         "--model",
         choices=["small", "base"],
