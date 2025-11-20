@@ -301,7 +301,17 @@
 
       function connectWebSocket() {
         try {
-          ws = new WebSocket("ws://localhost:8765");
+          // Auto-detect: use wss:// for production (Runpod), ws:// for localhost
+          const isLocalhost = window.location.hostname === 'localhost' ||
+                             window.location.hostname === '127.0.0.1' ||
+                             window.location.hostname === '';
+
+          const wsUrl = isLocalhost
+            ? "ws://localhost:8765"
+            : `wss://${window.location.hostname}:8765`;
+
+          console.log("Connecting to:", wsUrl);
+          ws = new WebSocket(wsUrl);
 
           ws.onopen = () => {
             console.log("WebSocket connected");
