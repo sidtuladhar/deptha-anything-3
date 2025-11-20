@@ -25,4 +25,6 @@ websockets>=11.0
 scipy
 addict
 msgpack
+aiortc
+av
 

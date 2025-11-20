@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Depth Anything v3 - Live Point Cloud Viewer</title>
+    <title>Depth Anything v3 - WebRTC Point Cloud Viewer</title>
     <style>
       * {
         margin: 0;
@@ -143,7 +143,7 @@
       <video id="webcam-preview" autoplay playsinline muted></video>
 
       <div id="info-panel">
-        <h1>Live Point Cloud</h1>
+        <h1>Live Point Cloud (WebRTC)</h1>
         <div class="status">
           <div class="status-dot" id="status-dot"></div>
           <span id="status-text">Click Start to begin</span>
@@ -151,7 +151,7 @@
         <button id="start-btn">Start Webcam</button>
         <div class="stat">Points: <strong id="point-count">0</strong></div>
         <div class="stat">FPS: <strong id="fps">0</strong></div>
-        <div class="stat">Latency: <strong id="latency">0ms</strong></div>
+        <div class="stat">Mode: <strong>WebRTC</strong></div>
         <div class="error-message" id="error" style="display: none"></div>
       </div>
 
@@ -162,8 +162,6 @@
         <div>🖱️ Scroll: Zoom</div>
       </div>
     </div>
-
-    <canvas id="frame-canvas" style="display: none;"></canvas>
 
     <!-- MessagePack for binary decoding -->
     <script src="https://cdn.jsdelivr.net/npm/msgpack-lite@0.1.26/dist/msgpack.min.js"></script>
@@ -181,16 +179,13 @@
       import * as THREE from "three";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-      // WebSocket connection
+      // WebRTC and WebSocket
       let ws = null;
-      let reconnectInterval = null;
+      let pc = null;  // RTCPeerConnection
 
       // Webcam
       let stream = null;
       let videoElement = document.getElementById("webcam-preview");
-      let canvas = document.getElementById("frame-canvas");
-      let ctx = canvas.getContext("2d");
-      let isStreaming = false;
 
       // Three.js setup
       const scene = new THREE.Scene();
@@ -237,7 +232,6 @@
       const statusText = document.getElementById("status-text");
       const pointCountEl = document.getElementById("point-count");
       const fpsEl = document.getElementById("fps");
-      const latencyEl = document.getElementById("latency");
       const errorEl = document.getElementById("error");
       const startBtn = document.getElementById("start-btn");
 
@@ -245,7 +239,7 @@
         if (connected) {
           statusDot.classList.add("connected");
           statusDot.classList.remove("disconnected");
-          statusText.textContent = "Connected";
+          statusText.textContent = "Connected (WebRTC)";
           errorEl.style.display = "none";
         } else {
           statusDot.classList.remove("connected");
@@ -261,12 +255,15 @@
       async function startWebcam() {
         try {
           stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 320, height: 240 },
+            video: {
+              width: 640,  // Higher resolution for WebRTC
+              height: 480,
+              frameRate: 30
+            },
           });
           videoElement.srcObject = stream;
           videoElement.style.display = "block";
 
-          // Wait for video to be ready
           await new Promise((resolve) => {
             videoElement.onloadedmetadata = () => {
               videoElement.play();
@@ -292,156 +289,121 @@
           videoElement.style.display = "none";
           stream = null;
         }
-        isStreaming = false;
         startBtn.textContent = "Start Webcam";
-
-        // Clear reconnect interval when stopping
-        if (reconnectInterval) {
-          clearInterval(reconnectInterval);
-          reconnectInterval = null;
-        }
       }
 
-      function connectWebSocket() {
+      async function connectWebRTC() {
         try {
-          // Auto-detect WebSocket URL based on current page location
+          // Create WebSocket for signaling
           const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
           const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-          console.log("Connecting to:", wsUrl);
+          console.log("Connecting WebSocket for signaling:", wsUrl);
           ws = new WebSocket(wsUrl);
 
-          ws.onopen = () => {
-            console.log("WebSocket connected");
+          ws.onopen = async () => {
+            console.log("WebSocket connected, establishing WebRTC...");
+
+            // Create RTCPeerConnection
+            pc = new RTCPeerConnection({
+              iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+            });
+
+            // Add local stream to peer connection
+            stream.getTracks().forEach(track => {
+              console.log("Adding track to peer connection:", track.kind);
+              pc.addTrack(track, stream);
+            });
+
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+              if (event.candidate) {
+                ws.send(JSON.stringify({
+                  type: "ice",
+                  candidate: event.candidate
+                }));
+              }
+            };
+
+            // Create and send offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({
+              type: offer.type,
+              sdp: offer.sdp
+            }));
+
+            console.log("WebRTC offer sent");
             updateStatus(true);
-            if (reconnectInterval) {
-              clearInterval(reconnectInterval);
-              reconnectInterval = null;
-            }
-            startFrameCapture();
           };
 
-          ws.onmessage = (event) => {
+          ws.onmessage = async (event) => {
             try {
-              let data;
-
-              // Handle both binary (msgpack) and text (JSON) messages
+              // Handle binary messages (point cloud data)
               if (event.data instanceof Blob) {
-                // Binary message - convert Blob to ArrayBuffer
                 event.data.arrayBuffer().then((buffer) => {
                   try {
-                    data = msgpack.decode(new Uint8Array(buffer));
+                    const data = msgpack.decode(new Uint8Array(buffer));
                     processPointCloudData(data);
                   } catch (e) {
-                    console.error("Error decoding Blob:", e);
+                    console.error("Error decoding point cloud:", e);
                   }
                 });
                 return;
               } else if (event.data instanceof ArrayBuffer) {
-                // Binary message - decode msgpack
-                data = msgpack.decode(new Uint8Array(event.data));
-              } else {
-                // Text message - parse JSON (fallback)
-                data = JSON.parse(event.data);
+                const data = msgpack.decode(new Uint8Array(event.data));
+                processPointCloudData(data);
+                return;
               }
 
-              processPointCloudData(data);
+              // Handle text messages (WebRTC signaling)
+              const data = JSON.parse(event.data);
+
+              if (data.type === "answer") {
+                // Receive WebRTC answer from server
+                const answer = new RTCSessionDescription(data);
+                await pc.setRemoteDescription(answer);
+                console.log("✅ WebRTC connection established!");
+              }
             } catch (e) {
-              console.error("Error parsing message:", e);
+              console.error("Error handling message:", e);
             }
           };
 
-          function processPointCloudData(data) {
-            if (data.type === "pointcloud") {
-              updatePointCloud(data);
-
-              // Update stats
-              frameCount++;
-              const now = Date.now();
-              if (now - lastTime >= 1000) {
-                fps = frameCount;
-                frameCount = 0;
-                lastTime = now;
-                fpsEl.textContent = fps;
-              }
-
-              // Ready for next frame
-              isProcessing = false;
-            }
-          }
-
           ws.onerror = (error) => {
             console.error("WebSocket error:", error);
-            updateStatus(false, "Connection Error - Retrying...");
+            updateStatus(false, "Connection Error");
           };
 
           ws.onclose = () => {
             console.log("WebSocket disconnected");
-            updateStatus(false, "Disconnected - Retrying...");
-
-            // Only retry if webcam is still active
-            if (stream) {
-              if (!reconnectInterval) {
-                reconnectInterval = setInterval(() => {
-                  console.log("Attempting to reconnect...");
-                  connectWebSocket();
-                }, 2000);
-              }
-            }
+            updateStatus(false, "Disconnected");
           };
+
         } catch (e) {
-          console.error("Failed to create WebSocket:", e);
+          console.error("Failed to establish WebRTC:", e);
           updateStatus(false, "Error: " + e.message);
         }
       }
 
-      let isProcessing = false;
+      function processPointCloudData(data) {
+        if (data.type === "pointcloud") {
+          updatePointCloud(data);
 
-      function startFrameCapture() {
-        if (!stream || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-        isStreaming = true;
-
-        function captureFrame() {
-          if (!isStreaming || isProcessing) return;
-
-          isProcessing = true;
-
-          // Set canvas size to match video
-          canvas.width = videoElement.videoWidth;
-          canvas.height = videoElement.videoHeight;
-
-          // Draw video frame to canvas
-          ctx.drawImage(videoElement, 0, 0);
-
-          // Convert to base64
-          const imageData = canvas.toDataURL("image/jpeg", 0.8);
-          const base64Data = imageData.split(",")[1];
-
-          // Send to server
-          const message = JSON.stringify({
-            type: "frame",
-            image: base64Data,
-          });
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(message);
+          // Update stats
+          frameCount++;
+          const now = Date.now();
+          if (now - lastTime >= 1000) {
+            fps = frameCount;
+            frameCount = 0;
+            lastTime = now;
+            fpsEl.textContent = fps;
           }
-
-          // Will be triggered after receiving response
         }
-
-        // Trigger frame capture
-        setInterval(() => {
-          if (!isProcessing && isStreaming) {
-            captureFrame();
-          }
-        }, 16); // Check every frame (60fps)
       }
 
       function updatePointCloud(data) {
-        const startTime = Date.now();
-
         // Remove old point cloud
         if (pointCloud) {
           scene.remove(pointCloud);
@@ -450,41 +412,54 @@
 
         let positions, colorArray;
 
-        // Check if data is in binary format (ArrayBuffer/Uint8Array) or array format
-        if (data.points instanceof Uint8Array || data.points instanceof ArrayBuffer) {
-          // Binary format - convert bytes to Float32Array
-          const pointsBuffer = data.points instanceof Uint8Array ? data.points : new Uint8Array(data.points);
-          const colorsBuffer = data.colors instanceof Uint8Array ? data.colors : new Uint8Array(data.colors);
+        const points = data.points;
+        const colors = data.colors;
 
-          positions = new Float32Array(pointsBuffer.buffer, pointsBuffer.byteOffset, pointsBuffer.byteLength / 4);
+        if (!points || points.length === 0) {
+          return;
+        }
+
+        // Check if points is a binary buffer (Uint8Array) or array
+        if (points instanceof Uint8Array || points.buffer) {
+          // Binary format - convert to Float32Array
+          const pointsBuffer = points instanceof Uint8Array ? points.buffer : points;
+          positions = new Float32Array(pointsBuffer);
 
           // Colors are uint8, convert to float32 and normalize
-          const numPoints = positions.length / 3;
-          colorArray = new Float32Array(numPoints * 3);
-          for (let i = 0; i < numPoints * 3; i++) {
-            colorArray[i] = colorsBuffer[i] / 255;
+          const colorsBuffer = colors instanceof Uint8Array ? colors.buffer : colors;
+          const colorsUint8 = new Uint8Array(colorsBuffer);
+          colorArray = new Float32Array(colorsUint8.length);
+          for (let i = 0; i < colorsUint8.length; i++) {
+            colorArray[i] = colorsUint8[i] / 255;
           }
 
           // Flip Z axis for depth
+          const numPoints = positions.length / 3;
+          for (let i = 0; i < numPoints; i++) {
+            positions[i * 3 + 2] = -positions[i * 3 + 2];
+          }
+        } else if (typeof points[0] === 'number') {
+          // Flattened list format (legacy)
+          positions = new Float32Array(points);
+
+          colorArray = new Float32Array(colors.length);
+          for (let i = 0; i < colors.length; i++) {
+            colorArray[i] = colors[i] / 255;
+          }
+
+          const numPoints = positions.length / 3;
           for (let i = 0; i < numPoints; i++) {
             positions[i * 3 + 2] = -positions[i * 3 + 2];
           }
         } else {
-          // Array format (legacy JSON) - convert to Float32Array
-          const points = data.points;
-          const colors = data.colors;
-
-          if (!points || points.length === 0) {
-            return;
-          }
-
+          // Nested array format (fallback)
           positions = new Float32Array(points.length * 3);
           colorArray = new Float32Array(colors.length * 3);
 
           for (let i = 0; i < points.length; i++) {
             positions[i * 3] = points[i][0];
             positions[i * 3 + 1] = points[i][1];
-            positions[i * 3 + 2] = -points[i][2]; // Flip Z for depth
+            positions[i * 3 + 2] = -points[i][2];
           }
 
           for (let i = 0; i < colors.length; i++) {
@@ -519,9 +494,6 @@
 
         // Update UI
         pointCountEl.textContent = data.num_points.toLocaleString();
-
-        const latency = Date.now() - startTime;
-        latencyEl.textContent = latency + "ms";
       }
 
       function animate() {
@@ -539,15 +511,16 @@
 
       // Event listeners
       startBtn.addEventListener("click", async () => {
-        if (!isStreaming) {
+        if (!stream) {
           startBtn.disabled = true;
           startBtn.textContent = "Starting...";
           const webcamOk = await startWebcam();
           if (webcamOk) {
-            connectWebSocket();
+            await connectWebRTC();
           }
         } else {
           stopWebcam();
+          if (pc) pc.close();
           if (ws) ws.close();
         }
       });

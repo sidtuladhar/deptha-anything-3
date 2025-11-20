@@ -1,10 +1,10 @@
 """
-Cloud-based depth streaming server for Runpod
-Serves viewer.html via HTTP and handles WebSocket connections for depth processing
+WebRTC-based depth streaming server for Runpod
+Uses WebRTC for efficient video streaming instead of base64 JPEG frames
 """
 
 import json
-import base64
+import asyncio
 import numpy as np
 import torch
 import msgpack
@@ -13,9 +13,76 @@ from PIL import Image
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 from depth_anything_3.api import DepthAnything3
+
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
+from aiortc.contrib.media import MediaBlackhole
+from av import VideoFrame
+
+
+class DepthProcessor(VideoStreamTrack):
+    """
+    Custom video track that processes incoming frames with depth estimation
+    """
+    def __init__(self, track, depth_server, websocket):
+        super().__init__()
+        self.track = track
+        self.depth_server = depth_server
+        self.websocket = websocket
+        self.frame_count = 0
+        self.is_processing = False
+        self.last_frame_time = datetime.now()
+
+    async def recv(self):
+        """Receive frame from client, process it, and send point cloud back"""
+        frame = await self.track.recv()
+
+        # Skip frame if still processing previous one
+        if self.is_processing:
+            return frame
+
+        self.is_processing = True
+        self.frame_count += 1
+
+        # Convert av.VideoFrame to numpy array
+        img = frame.to_ndarray(format="rgb24")
+
+        # Process with depth estimation
+        process_start = datetime.now()
+        points, colors, intrinsics = self.depth_server.process_frame_to_pointcloud(img)
+        process_time = (datetime.now() - process_start).total_seconds() * 1000
+
+        # Pack and send point cloud via WebSocket
+        pack_start = datetime.now()
+        response_data = {
+            "type": "pointcloud",
+            "timestamp": datetime.now().isoformat(),
+            "num_points": len(points),
+            "points": points.astype(np.float32).tobytes(),
+            "colors": colors.astype(np.uint8).tobytes(),
+        }
+        binary_response = msgpack.packb(response_data, use_bin_type=True)
+        pack_time = (datetime.now() - pack_start).total_seconds() * 1000
+
+        send_start = datetime.now()
+        await self.websocket.send_bytes(binary_response)
+        send_time = (datetime.now() - send_start).total_seconds() * 1000
+
+        # Calculate actual FPS
+        now = datetime.now()
+        actual_fps = 1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
+        self.last_frame_time = now
+
+        print(
+            f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS): {len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
+            f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
+        )
+
+        self.is_processing = False
+
+        # Return the frame (required by VideoStreamTrack)
+        return frame
 
 
 class CloudDepthServer:
@@ -43,7 +110,8 @@ class CloudDepthServer:
 
         print("✅ Model loaded successfully!")
 
-        self.clients = set()
+        self.clients = {}  # client_id -> RTCPeerConnection
+        self.pcs = set()  # All peer connections
 
     def process_frame_to_pointcloud(self, rgb_image):
         """Process a single frame to generate point cloud"""
@@ -120,9 +188,9 @@ class CloudDepthServer:
 
 
 # Create FastAPI app
-app = FastAPI(title="Depth Anything v3 Streaming Server")
+app = FastAPI(title="Depth Anything v3 WebRTC Streaming Server")
 
-# Global server instance (will be initialized in main)
+# Global server instance
 depth_server = None
 
 
@@ -134,68 +202,86 @@ async def serve_viewer():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Handle WebSocket connections for depth processing"""
+    """Handle WebSocket connections for WebRTC signaling and point cloud data"""
     await websocket.accept()
     client_id = id(websocket)
-    depth_server.clients.add(websocket)
-    print(f"👤 Client {client_id} connected. Total clients: {len(depth_server.clients)}")
+    print(f"👤 Client {client_id} connected")
+
+    pc = RTCPeerConnection()
+    depth_server.pcs.add(pc)
+
+    @pc.on("track")
+    def on_track(track):
+        print(f"📹 Track received: {track.kind}")
+        if track.kind == "video":
+            # Create depth processor that wraps the video track
+            depth_track = DepthProcessor(track, depth_server, websocket)
+
+            # Start receiving frames
+            asyncio.ensure_future(consume_video(depth_track))
+
+    async def consume_video(track):
+        """Consume video frames from the track"""
+        try:
+            while True:
+                await track.recv()
+        except Exception as e:
+            print(f"❌ Error consuming video: {e}")
 
     try:
         while True:
-            # Receive message from client
             message = await websocket.receive_text()
+            data = json.loads(message)
 
-            try:
-                data = json.loads(message)
+            if data["type"] == "offer":
+                # Receive WebRTC offer from client
+                offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+                await pc.setRemoteDescription(offer)
 
-                if data.get("type") == "frame":
-                    # Decode base64 image
-                    img_data = base64.b64decode(data["image"])
-                    img = Image.open(BytesIO(img_data))
-                    rgb_image = np.array(img)
+                # Create answer
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
 
-                    # Process frame
-                    points, colors, intrinsics = depth_server.process_frame_to_pointcloud(
-                        rgb_image
+                # Send answer back to client
+                await websocket.send_text(json.dumps({
+                    "type": pc.localDescription.type,
+                    "sdp": pc.localDescription.sdp
+                }))
+                print(f"✅ WebRTC connection established with client {client_id}")
+
+            elif data["type"] == "ice":
+                # Handle ICE candidates
+                candidate_dict = data["candidate"]
+                if candidate_dict:
+                    candidate = RTCIceCandidate(
+                        component=candidate_dict.get("component", 1),
+                        foundation=candidate_dict.get("foundation", ""),
+                        ip=candidate_dict.get("address", candidate_dict.get("ip", "")),
+                        port=candidate_dict.get("port", 0),
+                        priority=candidate_dict.get("priority", 0),
+                        protocol=candidate_dict.get("protocol", "udp"),
+                        type=candidate_dict.get("type", "host"),
+                        sdpMid=candidate_dict.get("sdpMid"),
+                        sdpMLineIndex=candidate_dict.get("sdpMLineIndex")
                     )
-
-                    # Send point cloud back to client using binary format (msgpack)
-                    # Convert numpy arrays to lists for msgpack compatibility
-                    response_data = {
-                        "type": "pointcloud",
-                        "timestamp": datetime.now().isoformat(),
-                        "num_points": len(points),
-                        "points": points.astype(np.float32).tobytes(),  # Send as raw bytes
-                        "colors": colors.astype(np.uint8).tobytes(),  # Send as raw bytes
-                    }
-
-                    # Pack with msgpack and send as binary
-                    binary_response = msgpack.packb(response_data, use_bin_type=True)
-                    await websocket.send_bytes(binary_response)
-
-                    print(
-                        f"📡 Processed frame for client {client_id}: {len(points)} points ({len(binary_response)/1024:.1f}KB)"
-                    )
-
-            except json.JSONDecodeError:
-                print(f"❌ Invalid JSON from client {client_id}")
-            except Exception as e:
-                print(f"❌ Error processing frame from client {client_id}: {e}")
-                import traceback
-
-                traceback.print_exc()
+                    await pc.addIceCandidate(candidate)
 
     except WebSocketDisconnect:
         print(f"👤 Client {client_id} disconnected")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        depth_server.clients.discard(websocket)
-        print(f"👤 Total clients: {len(depth_server.clients)}")
+        await pc.close()
+        depth_server.pcs.discard(pc)
+        print(f"👤 Total connections: {len(depth_server.pcs)}")
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Cloud depth streaming server for Runpod")
+    parser = argparse.ArgumentParser(description="WebRTC depth streaming server")
     parser.add_argument(
         "--model",
         choices=["small", "base"],
@@ -209,7 +295,7 @@ if __name__ == "__main__":
         help="Device to run on",
     )
     parser.add_argument(
-        "--host", default="0.0.0.0", help="Host to bind to (0.0.0.0 for all interfaces)"
+        "--host", default="0.0.0.0", help="Host to bind to"
     )
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
 
@@ -218,9 +304,8 @@ if __name__ == "__main__":
     # Initialize depth server
     depth_server = CloudDepthServer(model_size=args.model, device=args.device)
 
-    print(f"🌐 Starting server on {args.host}:{args.port}")
+    print(f"🌐 Starting WebRTC server on {args.host}:{args.port}")
     print(f"📄 Viewer available at: http://{args.host}:{args.port}/")
-    print(f"🔌 WebSocket endpoint: ws://{args.host}:{args.port}/ws")
 
-    # Start FastAPI server with uvicorn
+    # Start FastAPI server
     uvicorn.run(app, host=args.host, port=args.port)
