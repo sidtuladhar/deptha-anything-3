@@ -35,54 +35,79 @@ class DepthProcessor(VideoStreamTrack):
         self.last_frame_time = datetime.now()
 
     async def recv(self):
-        """Receive frame from client, process it, and send point cloud back"""
+        """Receive frame from client - just pass through, don't process here"""
         frame = await self.track.recv()
-
-        # Skip frame if still processing previous one
-        if self.is_processing:
-            return frame
-
-        self.is_processing = True
-        self.frame_count += 1
-
-        # Convert av.VideoFrame to numpy array
-        img = frame.to_ndarray(format="rgb24")
-
-        # Process with depth estimation
-        process_start = datetime.now()
-        points, colors, intrinsics = self.depth_server.process_frame_to_pointcloud(img)
-        process_time = (datetime.now() - process_start).total_seconds() * 1000
-
-        # Pack and send point cloud via WebSocket
-        pack_start = datetime.now()
-        response_data = {
-            "type": "pointcloud",
-            "timestamp": datetime.now().isoformat(),
-            "num_points": len(points),
-            "points": points.astype(np.float32).tobytes(),
-            "colors": colors.astype(np.uint8).tobytes(),
-        }
-        binary_response = msgpack.packb(response_data, use_bin_type=True)
-        pack_time = (datetime.now() - pack_start).total_seconds() * 1000
-
-        send_start = datetime.now()
-        await self.websocket.send_bytes(binary_response)
-        send_time = (datetime.now() - send_start).total_seconds() * 1000
-
-        # Calculate actual FPS
-        now = datetime.now()
-        actual_fps = 1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
-        self.last_frame_time = now
-
-        print(
-            f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS): {len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
-            f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
-        )
-
-        self.is_processing = False
-
-        # Return the frame (required by VideoStreamTrack)
         return frame
+
+    async def process_frame_async(self, img):
+        """Process a single frame asynchronously"""
+        try:
+            # Process with depth estimation (blocking, but in separate task)
+            process_start = datetime.now()
+            points, colors, intrinsics = await asyncio.to_thread(
+                self.depth_server.process_frame_to_pointcloud, img
+            )
+            process_time = (datetime.now() - process_start).total_seconds() * 1000
+
+            # Pack and send point cloud via WebSocket
+            pack_start = datetime.now()
+            response_data = {
+                "type": "pointcloud",
+                "timestamp": datetime.now().isoformat(),
+                "num_points": len(points),
+                "points": points.astype(np.float32).tobytes(),
+                "colors": colors.astype(np.uint8).tobytes(),
+            }
+            binary_response = msgpack.packb(response_data, use_bin_type=True)
+            pack_time = (datetime.now() - pack_start).total_seconds() * 1000
+
+            send_start = datetime.now()
+            await self.websocket.send_bytes(binary_response)
+            send_time = (datetime.now() - send_start).total_seconds() * 1000
+
+            # Calculate actual FPS
+            now = datetime.now()
+            actual_fps = 1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
+            self.last_frame_time = now
+
+            print(
+                f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS): {len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
+                f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
+            )
+
+        finally:
+            self.is_processing = False
+
+    async def process_frames(self):
+        """Actively consume and process frames with skipping"""
+        skipped = 0
+        while True:
+            try:
+                # Always consume frames to prevent queue buildup
+                frame = await self.track.recv()
+
+                # Skip if still processing
+                if self.is_processing:
+                    skipped += 1
+                    if skipped % 30 == 0:
+                        print(f"⏭️  Skipped {skipped} frames")
+                    continue
+
+                skipped = 0
+                self.is_processing = True
+                self.frame_count += 1
+
+                # Convert av.VideoFrame to numpy array
+                img = frame.to_ndarray(format="rgb24")
+
+                # Process in background (doesn't block frame consumption)
+                asyncio.create_task(self.process_frame_async(img))
+
+            except Exception as e:
+                print(f"❌ Error in frame loop: {e}")
+                import traceback
+                traceback.print_exc()
+                break
 
 
 class CloudDepthServer:
@@ -211,22 +236,14 @@ async def websocket_endpoint(websocket: WebSocket):
     depth_server.pcs.add(pc)
 
     @pc.on("track")
-    def on_track(track):
+    async def on_track(track):
         print(f"📹 Track received: {track.kind}")
         if track.kind == "video":
             # Create depth processor that wraps the video track
-            depth_track = DepthProcessor(track, depth_server, websocket)
+            depth_processor = DepthProcessor(track, depth_server, websocket)
 
-            # Start receiving frames
-            asyncio.ensure_future(consume_video(depth_track))
-
-    async def consume_video(track):
-        """Consume video frames from the track"""
-        try:
-            while True:
-                await track.recv()
-        except Exception as e:
-            print(f"❌ Error consuming video: {e}")
+            # Start processing frames (with built-in skipping)
+            asyncio.create_task(depth_processor.process_frames())
 
     try:
         while True:
