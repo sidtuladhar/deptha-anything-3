@@ -192,6 +192,7 @@
     <script type="module">
       import * as THREE from "three";
       import { SplatMesh } from "@sparkjsdev/spark";
+      import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.178.0/examples/jsm/controls/OrbitControls.js";
 
       // WebSocket connection
       let ws = null;
@@ -228,13 +229,21 @@
       const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
       scene.add(gridHelper);
 
+      // Add OrbitControls for camera movement
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.minDistance = 0.5;
+      controls.maxDistance = 50;
+
       // Add axes helper (always visible for coordinate debugging)
       const axesHelper = new THREE.AxesHelper(2);
       scene.add(axesHelper);
 
-      // Gaussian splat mesh
-      let splatMesh = null;
-      let currentBlobURL = null;
+      // Gaussian splat meshes - keep last 10 frames
+      let splatMeshes = [];
+      let blobURLs = [];
+      const MAX_FRAMES = 10;
 
       // Stats
       let frameCount = 0;
@@ -442,36 +451,39 @@
             `PLY size: ${(plyBytes.length / 1024).toFixed(1)}KB | Loading...`,
           );
 
-          // Remove old splat mesh if exists
-          if (splatMesh) {
-            scene.remove(splatMesh);
-            if (splatMesh.dispose) {
-              splatMesh.dispose();
-            }
-          }
-
-          // Revoke old Blob URL to prevent memory leaks
-          if (currentBlobURL) {
-            URL.revokeObjectURL(currentBlobURL);
-          }
-
           // Create new Blob URL from PLY bytes
           const blob = new Blob([plyBytes], {
             type: "application/octet-stream",
           });
-          currentBlobURL = URL.createObjectURL(blob);
+          const newBlobURL = URL.createObjectURL(blob);
 
           // Load into SparkJS SplatMesh
-          splatMesh = new SplatMesh({ url: currentBlobURL });
+          const newSplatMesh = new SplatMesh({ url: newBlobURL });
 
           // Set initial transform (may need adjustment for coordinate system)
-          splatMesh.position.set(0, 0, 0);
-          splatMesh.rotation.set(0, 0, 0);
+          newSplatMesh.position.set(0, 0, 0);
+          newSplatMesh.rotation.set(0, 0, 0);
 
-          scene.add(splatMesh);
+          scene.add(newSplatMesh);
+
+          // Add to arrays
+          splatMeshes.push(newSplatMesh);
+          blobURLs.push(newBlobURL);
+
+          // Remove oldest frame if we exceed MAX_FRAMES
+          if (splatMeshes.length > MAX_FRAMES) {
+            const oldMesh = splatMeshes.shift();
+            const oldURL = blobURLs.shift();
+
+            scene.remove(oldMesh);
+            if (oldMesh.dispose) {
+              oldMesh.dispose();
+            }
+            URL.revokeObjectURL(oldURL);
+          }
 
           updateDebugInfo(
-            `✅ Loaded ${(plyBytes.length / 1024).toFixed(1)}KB PLY`,
+            `✅ Loaded ${(plyBytes.length / 1024).toFixed(1)}KB PLY | Frames: ${splatMeshes.length}/${MAX_FRAMES}`,
           );
 
           // Update FPS stats
@@ -493,6 +505,7 @@
 
       function animate() {
         requestAnimationFrame(animate);
+        controls.update(); // Update OrbitControls for damping
         renderer.render(scene, camera);
       }
 
