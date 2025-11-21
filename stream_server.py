@@ -20,7 +20,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 import uvicorn
 from depth_anything_3.api import DepthAnything3
-from depth_anything_3.utils.gsply_helpers import save_gaussian_ply_bytes
 
 # Suppress all INFO logs from dependencies
 logging.basicConfig(level=logging.WARNING)
@@ -52,86 +51,45 @@ class DepthProcessor:
         try:
             process_start = datetime.now()
 
-            # Model-dependent routing: Gaussians for giant model, point clouds otherwise
-            if self.depth_server.supports_gaussians:
-                # Process with Gaussian splat generation
-                ply_bytes = await asyncio.to_thread(
-                    self.depth_server.process_frame_to_gaussians, img
+            # Process with point cloud generation
+            points, colors, intrinsics = await asyncio.to_thread(
+                self.depth_server.process_frame_to_pointcloud, img
+            )
+            process_time = (datetime.now() - process_start).total_seconds() * 1000
+
+            # Pack and send point cloud via WebSocket
+            pack_start = datetime.now()
+            response_data = {
+                "type": "pointcloud",
+                "timestamp": datetime.now().isoformat(),
+                "num_points": len(points),
+                "points": points.astype(np.float32).tobytes(),
+                "colors": colors.astype(np.uint8).tobytes(),
+            }
+            binary_response = msgpack.packb(response_data, use_bin_type=True)
+            pack_time = (datetime.now() - pack_start).total_seconds() * 1000
+
+            send_start = datetime.now()
+            await self.websocket.send_bytes(binary_response)
+            send_time = (datetime.now() - send_start).total_seconds() * 1000
+
+            # Calculate actual FPS
+            now = datetime.now()
+            actual_fps = (
+                1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
+            )
+            self.last_frame_time = now
+
+            # Log every 5 seconds
+            time_since_last_log = (now - self.last_log_time).total_seconds()
+            if time_since_last_log >= 5.0:
+                device_label = "GPU" if self.depth_server.device.type in ["cuda", "mps"] else "CPU"
+                print(
+                    f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS) [{device_label}]: "
+                    f"{len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
+                    f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
                 )
-                process_time = (datetime.now() - process_start).total_seconds() * 1000
-
-                # Pack and send Gaussian PLY via WebSocket
-                pack_start = datetime.now()
-                response_data = {
-                    "type": "gaussian_ply",
-                    "timestamp": datetime.now().isoformat(),
-                    "ply_data": ply_bytes,
-                }
-                binary_response = msgpack.packb(response_data, use_bin_type=True)
-                pack_time = (datetime.now() - pack_start).total_seconds() * 1000
-
-                send_start = datetime.now()
-                await self.websocket.send_bytes(binary_response)
-                send_time = (datetime.now() - send_start).total_seconds() * 1000
-
-                # Calculate actual FPS
-                now = datetime.now()
-                actual_fps = (
-                    1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
-                )
-                self.last_frame_time = now
-
-                # Log every 5 seconds
-                time_since_last_log = (now - self.last_log_time).total_seconds()
-                if time_since_last_log >= 5.0:
-                    device_label = "GPU" if self.depth_server.device.type in ["cuda", "mps"] else "CPU"
-                    print(
-                        f"✨ Frame {self.frame_count} ({actual_fps:.1f} FPS) [{device_label}]: "
-                        f"Gaussian PLY ({len(binary_response)/1024:.1f}KB) | "
-                        f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
-                    )
-                    self.last_log_time = now
-
-            else:
-                # Process with point cloud generation (existing code)
-                points, colors, intrinsics = await asyncio.to_thread(
-                    self.depth_server.process_frame_to_pointcloud, img
-                )
-                process_time = (datetime.now() - process_start).total_seconds() * 1000
-
-                # Pack and send point cloud via WebSocket
-                pack_start = datetime.now()
-                response_data = {
-                    "type": "pointcloud",
-                    "timestamp": datetime.now().isoformat(),
-                    "num_points": len(points),
-                    "points": points.astype(np.float32).tobytes(),
-                    "colors": colors.astype(np.uint8).tobytes(),
-                }
-                binary_response = msgpack.packb(response_data, use_bin_type=True)
-                pack_time = (datetime.now() - pack_start).total_seconds() * 1000
-
-                send_start = datetime.now()
-                await self.websocket.send_bytes(binary_response)
-                send_time = (datetime.now() - send_start).total_seconds() * 1000
-
-                # Calculate actual FPS
-                now = datetime.now()
-                actual_fps = (
-                    1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
-                )
-                self.last_frame_time = now
-
-                # Log every 5 seconds
-                time_since_last_log = (now - self.last_log_time).total_seconds()
-                if time_since_last_log >= 5.0:
-                    device_label = "GPU" if self.depth_server.device.type in ["cuda", "mps"] else "CPU"
-                    print(
-                        f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS) [{device_label}]: "
-                        f"{len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
-                        f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
-                    )
-                    self.last_log_time = now
+                self.last_log_time = now
 
         finally:
             self.is_processing = False
@@ -317,12 +275,11 @@ class CloudDepthServer:
         model_map = {
             "small": "depth-anything/da3-small",
             "base": "depth-anything/da3-base",
-            "giant": "depth-anything/da3-giant",  # Gaussian splat support
+            "giant": "depth-anything/da3-giant",
         }
 
-        # Store model size for later detection
+        # Store model size
         self.model_size = model_size
-        self.supports_gaussians = model_size == "giant"
 
         if device == "cuda" and torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -345,12 +302,6 @@ class CloudDepthServer:
             print(f"⚡ GPU-accelerated point cloud generation enabled (MPS)")
         else:
             print(f"⚠️  Using CPU for point cloud generation")
-
-        # Show Gaussian splat support status
-        if self.supports_gaussians:
-            print(f"✨ Gaussian splat mode ENABLED (giant model)")
-        else:
-            print(f"📍 Point cloud mode (use --model=giant for Gaussian splats)")
 
         self.active_processors = {}  # client_id -> DepthProcessor
         self.multi_camera = MultiCameraManager(time_window_ms=500.0, max_buffer_size=1)  # Keep only latest frame
@@ -526,48 +477,6 @@ class CloudDepthServer:
 
         return points, colors, intrinsics
 
-    def process_frame_to_gaussians(self, rgb_image):
-        """Process a single frame to generate Gaussian splats (giant model only)"""
-        if not self.supports_gaussians:
-            raise RuntimeError(
-                f"Gaussian splat mode requires giant model, but {self.model_size} model is loaded. "
-                "Please restart with --model=giant"
-            )
-
-        # Convert numpy array to PIL Image
-        pil_image = Image.fromarray(rgb_image)
-
-        # Run DepthAnything v3 inference with Gaussian output
-        prediction = self.model.inference(
-            [pil_image],
-            infer_gs=True,  # CRITICAL: Enable Gaussian splat output
-            export_dir=None,
-            export_format=[],
-        )
-
-        # Extract Gaussian parameters from prediction
-        gaussians = prediction.gaussians
-
-        # Get depth map for filtering (needed by save_gaussian_ply_bytes)
-        depth_map = prediction.depth[0]
-        if torch.is_tensor(depth_map):
-            depth_tensor = depth_map.unsqueeze(0).unsqueeze(-1)  # v h w 1 format
-        else:
-            depth_tensor = torch.from_numpy(depth_map).unsqueeze(0).unsqueeze(-1).to(self.device)
-
-        # Generate PLY bytes in-memory with pruning
-        ply_bytes = save_gaussian_ply_bytes(
-            gaussians=gaussians,
-            ctx_depth=depth_tensor,
-            shift_and_scale=False,  # Keep original world coordinates
-            save_sh_dc_only=True,  # DC-only for bandwidth optimization
-            prune_by_opacity=0.1,  # Remove low-opacity Gaussians
-            prune_border_gs=True,  # Remove border artifacts
-            prune_by_depth_percent=1.0,  # Keep all depth levels
-        )
-
-        return ply_bytes
-
     def process_multiview_to_pointcloud(self, rgb_images: List[np.ndarray]):
         """
         Process multiple synchronized frames for multi-view depth reconstruction
@@ -687,22 +596,10 @@ async def serve_point_cloud_viewer():
     return FileResponse("viewer.html")
 
 
-@app.get("/viewer-gaussian.html")
-async def serve_gaussian_viewer():
-    """Serve the Gaussian splat viewer (giant model)"""
-    return FileResponse("viewer-gaussian.html")
-
-
 @app.get("/viewer-multicam.html")
 async def serve_multicam_viewer():
     """Serve the multi-camera viewer"""
     return FileResponse("viewer-multicam.html")
-
-
-@app.get("/test-sparkjs.html")
-async def serve_sparkjs_test():
-    """Serve the SparkJS test page"""
-    return FileResponse("test-sparkjs.html")
 
 
 @app.websocket("/ws")
@@ -920,7 +817,7 @@ if __name__ == "__main__":
         "--model",
         choices=["small", "base", "giant"],
         default="base",
-        help="DepthAnything model size (giant enables Gaussian splats)",
+        help="DepthAnything model size",
     )
     parser.add_argument(
         "--device",
@@ -939,8 +836,6 @@ if __name__ == "__main__":
     print(f"\n🌐 Starting WebSocket server on {args.host}:{args.port}")
     print(f"📄 Single-camera viewer: http://{args.host}:{args.port}/")
     print(f"🎥 Multi-camera viewer:  http://{args.host}:{args.port}/viewer-multicam.html")
-    if args.model == "giant":
-        print(f"✨ Gaussian splat viewer: http://{args.host}:{args.port}/viewer-gaussian.html")
     print()
 
     # Start FastAPI server
