@@ -82,6 +82,10 @@ def _depths_to_world_points_with_colors(
 
         rays = K_inv @ pix[vidx].T  # (3,M)
         Xc = rays * d_flat[vidx][None, :]  # (3,M)
+
+        # Flip Y coordinate to match image coordinate system (consistent with single-camera mode)
+        Xc[1, :] = -Xc[1, :]
+
         Xc_h = np.vstack([Xc, np.ones((1, Xc.shape[1]))])
         Xw = (c2w @ Xc_h)[:3].T.astype(np.float32)  # (M,3)
 
@@ -642,8 +646,8 @@ class CloudDepthServer:
             images_u8.append(rgb_img)
         images_u8 = np.stack(images_u8, axis=0).astype(np.uint8)  # (N, H, W, 3)
 
-        # Calculate adaptive confidence threshold
-        base_conf_threshold = 0.5
+        # Calculate adaptive confidence threshold (match official export_to_glb defaults)
+        base_conf_threshold = 0.9  # Higher threshold = only high-confidence points
         if conf is not None:
             conf_threshold = get_conf_thresh(
                 conf.reshape(-1),  # Flatten all confidence values
@@ -666,8 +670,8 @@ class CloudDepthServer:
             conf_thr=conf_threshold,
         )
 
-        # Downsample for streaming performance (100k points = smooth 30 FPS)
-        num_max_points = 100_000
+        # Downsample for streaming (250k points = smooth + high quality)
+        num_max_points = 250_000
         points, colors = _filter_and_downsample(points, colors, num_max_points)
 
         # Use primary camera's intrinsics for reference
@@ -705,12 +709,28 @@ async def serve_multicam_viewer():
     return FileResponse("viewer-multicam.html")
 
 
+async def keepalive_ping_task(websocket: WebSocket, client_id: int, interval: float = 15.0):
+    """Background task to send periodic pings to keep WebSocket connection alive"""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await websocket.send_text(json.dumps({"type": "ping"}))
+            except Exception as e:
+                # Connection closed, exit task
+                break
+    except asyncio.CancelledError:
+        # Task was cancelled (client disconnected)
+        pass
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Handle WebSocket connections for multi-camera depth streaming"""
     await websocket.accept()
     client_id = id(websocket)
     client_role = None
+    keepalive_task = None
     print(f"👤 Client {client_id} connected via WebSocket")
 
     # Create depth processor for legacy single-camera mode
@@ -739,6 +759,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(
                             f"📝 Client {client_id} registered as {client_role} (timestamp: {client_timestamp})"
                         )
+
+                        # Start keepalive ping for camera clients to prevent 30s timeout
+                        if client_role == "camera" and keepalive_task is None:
+                            keepalive_task = asyncio.create_task(
+                                keepalive_ping_task(websocket, client_id, interval=15.0)
+                            )
+                            print(f"🔄 Started keepalive pings for camera {client_id}")
 
                         # Broadcast updated camera list to ALL viewers
                         await broadcast_camera_list_to_viewers(depth_server)
@@ -824,6 +851,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
         traceback.print_exc()
     finally:
+        # Cancel keepalive task if it exists
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
+
         # Clean up
         if client_role:
             depth_server.multi_camera.unregister_client(client_id)
