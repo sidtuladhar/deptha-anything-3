@@ -43,6 +43,8 @@ RUN pip3 install --no-cache-dir -r requirements.txt || \
 COPY src/ ./src/
 COPY stream_server.py .
 COPY viewer.html .
+COPY viewer-gaussian.html .
+COPY test-sparkjs.html .
 
 # Add src to Python path so imports work
 ENV PYTHONPATH=/opt/depth-streaming/app/src:$PYTHONPATH
