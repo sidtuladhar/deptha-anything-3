@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 import uvicorn
 from depth_anything_3.api import DepthAnything3
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, VideoStreamTrack, RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaBlackhole
 from av import VideoFrame
 
@@ -249,12 +249,13 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"👤 Client {client_id} connected")
 
     # Configure STUN servers for NAT traversal
-    pc = RTCPeerConnection(configuration={
-        "iceServers": [
-            {"urls": "stun:stun.l.google.com:19302"},
-            {"urls": "stun:stun1.l.google.com:19302"},
+    configuration = RTCConfiguration(
+        iceServers=[
+            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
         ]
-    })
+    )
+    pc = RTCPeerConnection(configuration=configuration)
     depth_server.pcs.add(pc)
 
     # Monitor ICE connection state
