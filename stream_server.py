@@ -17,8 +17,8 @@ from fastapi.responses import FileResponse
 import uvicorn
 from depth_anything_3.api import DepthAnything3
 
-# Reduce model logging verbosity
-logging.getLogger("depth_anything_3").setLevel(logging.WARNING)
+# Suppress all INFO logs from dependencies
+logging.basicConfig(level=logging.WARNING)
 
 
 class DepthProcessor:
