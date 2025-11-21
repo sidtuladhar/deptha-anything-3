@@ -398,14 +398,14 @@ class CloudDepthServer:
         else:
             depth_tensor = torch.from_numpy(depth_map).unsqueeze(0).unsqueeze(-1).to(self.device)
 
-        # Generate PLY bytes in-memory WITHOUT pruning (maximum quality)
+        # Generate PLY bytes in-memory with pruning
         ply_bytes = save_gaussian_ply_bytes(
             gaussians=gaussians,
             ctx_depth=depth_tensor,
             shift_and_scale=False,  # Keep original world coordinates
             save_sh_dc_only=True,  # DC-only for bandwidth optimization
-            prune_by_opacity=0.0,  # NO pruning - keep all Gaussians
-            prune_border_gs=False,  # Keep border Gaussians
+            prune_by_opacity=0.1,  # Remove low-opacity Gaussians
+            prune_border_gs=True,  # Remove border artifacts
             prune_by_depth_percent=1.0,  # Keep all depth levels
         )
 

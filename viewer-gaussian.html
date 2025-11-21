@@ -233,17 +233,17 @@
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.05;
-      controls.minDistance = 0.5;
-      controls.maxDistance = 50;
+      controls.minDistance = 0.1;
+      controls.maxDistance = 500; // Allow zooming out much farther
 
       // Add axes helper (always visible for coordinate debugging)
       const axesHelper = new THREE.AxesHelper(2);
       scene.add(axesHelper);
 
-      // Gaussian splat meshes - keep last 10 frames
+      // Gaussian splat meshes - keep last 2 frames
       let splatMeshes = [];
       let blobURLs = [];
-      const MAX_FRAMES = 10;
+      const MAX_FRAMES = 2;
 
       // Stats
       let frameCount = 0;
