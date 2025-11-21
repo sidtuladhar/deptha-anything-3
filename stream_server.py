@@ -184,7 +184,7 @@ class CloudDepthServer:
         else:
             rgb_tensor = torch.from_numpy(rgb_image).to(self.device)
 
-        downsample = 3
+        downsample = 2
 
         # Create mesh grid on GPU
         x_coords = torch.arange(0, w, downsample, device=self.device)
@@ -206,7 +206,9 @@ class CloudDepthServer:
         if confidence is not None:
             conf_threshold = 0.5
             conf_flat = confidence.flatten()
-            conf_sampled = torch.index_select(conf_flat, 0, linear_indices.long()).reshape(yy.shape)
+            conf_sampled = torch.index_select(conf_flat, 0, linear_indices.long()).reshape(
+                yy.shape
+            )
             valid_mask = conf_sampled > conf_threshold
 
             # Apply mask
@@ -250,7 +252,7 @@ class CloudDepthServer:
         )
 
         # Use GPU-accelerated version for CUDA and MPS
-        if self.device.type in ['cuda', 'mps']:
+        if self.device.type in ["cuda", "mps"]:
             return self.process_frame_to_pointcloud_gpu(rgb_image, prediction)
 
         # Fallback to CPU version
@@ -392,7 +394,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         choices=["small", "base"],
-        default="small",
+        default="base",
         help="DepthAnything model size",
     )
     parser.add_argument(
