@@ -425,6 +425,24 @@ async def serve_viewer():
     return FileResponse("viewer.html")
 
 
+@app.get("/viewer.html")
+async def serve_point_cloud_viewer():
+    """Serve the point cloud viewer (base model)"""
+    return FileResponse("viewer.html")
+
+
+@app.get("/viewer-gaussian.html")
+async def serve_gaussian_viewer():
+    """Serve the Gaussian splat viewer (giant model)"""
+    return FileResponse("viewer-gaussian.html")
+
+
+@app.get("/test-sparkjs.html")
+async def serve_sparkjs_test():
+    """Serve the SparkJS test page"""
+    return FileResponse("test-sparkjs.html")
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Handle WebSocket connections for JPEG video frames and point cloud data"""
