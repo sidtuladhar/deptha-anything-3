@@ -8,6 +8,7 @@ import asyncio
 import numpy as np
 import torch
 import msgpack
+import logging
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
@@ -15,6 +16,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 import uvicorn
 from depth_anything_3.api import DepthAnything3
+
+# Reduce model logging verbosity
+logging.getLogger("depth_anything_3").setLevel(logging.WARNING)
 
 
 class DepthProcessor:
@@ -28,6 +32,7 @@ class DepthProcessor:
         self.frame_count = 0
         self.is_processing = False
         self.last_frame_time = datetime.now()
+        self.last_log_time = datetime.now()
 
     async def process_frame_async(self, img):
         """Process a single frame asynchronously"""
@@ -38,6 +43,9 @@ class DepthProcessor:
                 self.depth_server.process_frame_to_pointcloud, img
             )
             process_time = (datetime.now() - process_start).total_seconds() * 1000
+
+            # Track GPU vs CPU usage
+            device_type = self.depth_server.device.type
 
             # Pack and send point cloud via WebSocket
             pack_start = datetime.now()
@@ -62,10 +70,15 @@ class DepthProcessor:
             )
             self.last_frame_time = now
 
-            print(
-                f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS): {len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
-                f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
-            )
+            # Log every 5 seconds instead of every frame
+            time_since_last_log = (now - self.last_log_time).total_seconds()
+            if time_since_last_log >= 5.0:
+                device_label = "GPU" if device_type in ["cuda", "mps"] else "CPU"
+                print(
+                    f"📊 Frame {self.frame_count} ({actual_fps:.1f} FPS) [{device_label}]: {len(points)} pts ({len(binary_response)/1024:.1f}KB) | "
+                    f"Process: {process_time:.1f}ms | Pack: {pack_time:.1f}ms | Send: {send_time:.1f}ms"
+                )
+                self.last_log_time = now
 
         finally:
             self.is_processing = False
@@ -124,7 +137,85 @@ class CloudDepthServer:
 
         print("✅ Model loaded successfully!")
 
+        # Show GPU optimization status
+        if self.device.type == "cuda":
+            print(f"⚡ GPU-accelerated point cloud generation enabled (CUDA)")
+        elif self.device.type == "mps":
+            print(f"🍎 MPS detected - using CPU fallback for point cloud generation")
+            print(f"   (GPU acceleration only available with CUDA on production)")
+        else:
+            print(f"⚠️  Using CPU for point cloud generation")
+
         self.active_processors = {}  # client_id -> DepthProcessor
+
+    def process_frame_to_pointcloud_gpu(self, rgb_image, prediction):
+        """GPU-accelerated point cloud generation - keeps tensors on GPU"""
+        # Get depth map and intrinsics (keep as tensors on GPU!)
+        depth_map = prediction.depth[0]
+
+        confidence = None
+        if hasattr(prediction, "conf") and prediction.conf is not None:
+            confidence = prediction.conf[0]
+
+        intrinsics = prediction.intrinsics[0]
+
+        # Extract camera parameters (move scalars to CPU)
+        fx = intrinsics[0, 0].item()
+        fy = intrinsics[1, 1].item()
+        cx = intrinsics[0, 2].item()
+        cy = intrinsics[1, 2].item()
+
+        # Get dimensions
+        h, w = depth_map.shape
+
+        # Convert RGB image to torch tensor on GPU
+        if rgb_image.shape[0] != h or rgb_image.shape[1] != w:
+            # Resize using PIL then convert to tensor
+            pil_image = Image.fromarray(rgb_image)
+            rgb_resized = np.array(pil_image.resize((w, h), Image.BILINEAR))
+            rgb_tensor = torch.from_numpy(rgb_resized).to(self.device)
+        else:
+            rgb_tensor = torch.from_numpy(rgb_image).to(self.device)
+
+        downsample = 3
+
+        # Create mesh grid on GPU
+        x_coords = torch.arange(0, w, downsample, device=self.device)
+        y_coords = torch.arange(0, h, downsample, device=self.device)
+        yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
+
+        # Get depth values (GPU indexing)
+        z = depth_map[yy, xx]
+
+        # Filter by confidence if available (all on GPU!)
+        if confidence is not None:
+            conf_threshold = 0.5
+            conf_values = confidence[yy, xx]
+            valid_mask = conf_values > conf_threshold
+
+            # Apply mask
+            xx = xx[valid_mask]
+            yy = yy[valid_mask]
+            z = z[valid_mask]
+
+        # Calculate 3D coordinates (GPU operations)
+        x = (xx.float() - cx) * z / fx
+        y = -((yy.float() - cy) * z / fy)  # Negate Y to flip vertically
+
+        # Get colors using advanced indexing (GPU)
+        yy_int = yy.long()
+        xx_int = xx.long()
+        colors = rgb_tensor[yy_int, xx_int]  # Shape: (N, 3)
+
+        # Stack into point cloud (still on GPU)
+        points = torch.stack([x, y, z], dim=-1)  # Shape: (N, 3)
+
+        # Move to CPU and convert to numpy only at the end
+        points_np = points.cpu().numpy().astype(np.float32)
+        colors_np = colors.cpu().numpy().astype(np.uint8)
+        intrinsics_np = intrinsics.cpu().numpy()
+
+        return points_np, colors_np, intrinsics_np
 
     def process_frame_to_pointcloud(self, rgb_image):
         """Process a single frame to generate point cloud"""
@@ -138,6 +229,11 @@ class CloudDepthServer:
             export_format=[],
         )
 
+        # Use GPU-accelerated version only for CUDA (not MPS due to indexing limitations)
+        if self.device.type == "cuda":
+            return self.process_frame_to_pointcloud_gpu(rgb_image, prediction)
+
+        # Fallback to CPU version
         # Get depth map and intrinsics
         depth_map = prediction.depth[0]
         if torch.is_tensor(depth_map):
