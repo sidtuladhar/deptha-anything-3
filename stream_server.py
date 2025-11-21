@@ -1,6 +1,6 @@
 """
-WebRTC-based depth streaming server for Runpod
-Uses WebRTC for efficient video streaming instead of base64 JPEG frames
+WebSocket-based depth streaming server for Runpod
+Uses WebSocket for video streaming (JPEG frames) - works on TCP-only Runpod network
 """
 
 import json
@@ -16,28 +16,17 @@ from fastapi.responses import FileResponse
 import uvicorn
 from depth_anything_3.api import DepthAnything3
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, VideoStreamTrack, RTCConfiguration, RTCIceServer
-from aiortc.contrib.media import MediaBlackhole
-from av import VideoFrame
 
-
-class DepthProcessor(VideoStreamTrack):
+class DepthProcessor:
     """
-    Custom video track that processes incoming frames with depth estimation
+    Processes incoming JPEG frames with depth estimation
     """
-    def __init__(self, track, depth_server, websocket):
-        super().__init__()
-        self.track = track
+    def __init__(self, depth_server, websocket):
         self.depth_server = depth_server
         self.websocket = websocket
         self.frame_count = 0
         self.is_processing = False
         self.last_frame_time = datetime.now()
-
-    async def recv(self):
-        """Receive frame from client - just pass through, don't process here"""
-        frame = await self.track.recv()
-        return frame
 
     async def process_frame_async(self, img):
         """Process a single frame asynchronously"""
@@ -78,52 +67,32 @@ class DepthProcessor(VideoStreamTrack):
         finally:
             self.is_processing = False
 
-    async def process_frames(self):
-        """Actively consume and process frames with skipping"""
-        print(f"🎬 Starting process_frames loop")
-        skipped = 0
-        frames_received = 0
+    async def process_jpeg_frame(self, jpeg_bytes):
+        """Process a JPEG frame received via WebSocket"""
+        # Skip if still processing previous frame
+        if self.is_processing:
+            return  # Silently skip - client will send more frames
 
-        while True:
-            try:
-                # Always consume frames to prevent queue buildup
-                # Add timeout to prevent indefinite hanging
-                if frames_received == 0:
-                    print(f"⏳ Waiting for first frame from track...")
+        try:
+            self.is_processing = True
+            self.frame_count += 1
 
-                frame = await asyncio.wait_for(self.track.recv(), timeout=30.0)
+            # Decode JPEG to numpy array
+            pil_image = Image.open(BytesIO(jpeg_bytes))
+            img = np.array(pil_image)
 
-                if frames_received == 0:
-                    print(f"✅ First frame received! Stream is flowing.")
+            # Ensure RGB format
+            if img.shape[2] == 4:  # RGBA
+                img = img[:, :, :3]
 
-                frames_received += 1
+            # Process in background (doesn't block WebSocket)
+            asyncio.create_task(self.process_frame_async(img))
 
-                # Skip if still processing
-                if self.is_processing:
-                    skipped += 1
-                    if skipped % 30 == 0:
-                        print(f"⏭️  Skipped {skipped} frames (total received: {frames_received})")
-                    continue
-
-                skipped = 0
-                self.is_processing = True
-                self.frame_count += 1
-
-                # Convert av.VideoFrame to numpy array
-                img = frame.to_ndarray(format="rgb24")
-
-                # Process in background (doesn't block frame consumption)
-                asyncio.create_task(self.process_frame_async(img))
-
-            except asyncio.TimeoutError:
-                print(f"⏱️  Timeout waiting for frame (waited 30s, received {frames_received} frames total)")
-                print(f"💡 This usually means ICE connection failed to establish media path")
-                break
-            except Exception as e:
-                print(f"❌ Error in frame loop: {e}")
-                import traceback
-                traceback.print_exc()
-                break
+        except Exception as e:
+            print(f"❌ Error processing JPEG frame: {e}")
+            import traceback
+            traceback.print_exc()
+            self.is_processing = False
 
 
 class CloudDepthServer:
@@ -151,8 +120,7 @@ class CloudDepthServer:
 
         print("✅ Model loaded successfully!")
 
-        self.clients = {}  # client_id -> RTCPeerConnection
-        self.pcs = set()  # All peer connections
+        self.active_processors = {}  # client_id -> DepthProcessor
 
     def process_frame_to_pointcloud(self, rgb_image):
         """Process a single frame to generate point cloud"""
@@ -229,7 +197,7 @@ class CloudDepthServer:
 
 
 # Create FastAPI app
-app = FastAPI(title="Depth Anything v3 WebRTC Streaming Server")
+app = FastAPI(title="Depth Anything v3 WebSocket Streaming Server")
 
 # Global server instance
 depth_server = None
@@ -243,98 +211,63 @@ async def serve_viewer():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Handle WebSocket connections for WebRTC signaling and point cloud data"""
+    """Handle WebSocket connections for JPEG video frames and point cloud data"""
     await websocket.accept()
     client_id = id(websocket)
-    print(f"👤 Client {client_id} connected")
+    print(f"👤 Client {client_id} connected via WebSocket")
 
-    # Configure STUN servers for NAT traversal
-    configuration = RTCConfiguration(
-        iceServers=[
-            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-            RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-        ]
-    )
-    pc = RTCPeerConnection(configuration=configuration)
-    depth_server.pcs.add(pc)
-
-    # Monitor ICE connection state
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        print(f"🔌 ICE connection state: {pc.connectionState}")
-        if pc.connectionState == "failed":
-            print(f"❌ ICE connection failed - check firewall/NAT settings")
-        elif pc.connectionState == "connected":
-            print(f"✅ Media connection established!")
-
-    @pc.on("iceconnectionstatechange")
-    async def on_iceconnectionstatechange():
-        print(f"🧊 ICE state: {pc.iceConnectionState}")
-
-    @pc.on("track")
-    async def on_track(track):
-        print(f"📹 Track received: {track.kind}")
-        if track.kind == "video":
-            # Create depth processor that wraps the video track
-            depth_processor = DepthProcessor(track, depth_server, websocket)
-
-            # Start processing frames (with built-in skipping)
-            asyncio.create_task(depth_processor.process_frames())
+    # Create depth processor for this client
+    depth_processor = DepthProcessor(depth_server, websocket)
+    depth_server.active_processors[client_id] = depth_processor
 
     try:
+        print(f"🎬 Ready to receive JPEG frames from client {client_id}")
+        frame_count = 0
+
         while True:
-            message = await websocket.receive_text()
-            data = json.loads(message)
+            # Receive message - could be binary (JPEG frame) or text (control)
+            try:
+                # Try to receive as bytes first (JPEG frames)
+                jpeg_bytes = await websocket.receive_bytes()
+                frame_count += 1
 
-            if data["type"] == "offer":
-                # Receive WebRTC offer from client
-                offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
-                await pc.setRemoteDescription(offer)
+                if frame_count == 1:
+                    print(f"✅ First frame received from client {client_id}!")
 
-                # Create answer
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
+                # Process the JPEG frame
+                await depth_processor.process_jpeg_frame(jpeg_bytes)
 
-                # Send answer back to client
-                await websocket.send_text(json.dumps({
-                    "type": pc.localDescription.type,
-                    "sdp": pc.localDescription.sdp
-                }))
-                print(f"✅ WebRTC connection established with client {client_id}")
+            except:
+                # If not bytes, try text (control messages)
+                try:
+                    message = await websocket.receive_text()
+                    data = json.loads(message)
 
-            elif data["type"] == "ice":
-                # Handle ICE candidates
-                candidate_dict = data["candidate"]
-                if candidate_dict:
-                    candidate = RTCIceCandidate(
-                        component=candidate_dict.get("component", 1),
-                        foundation=candidate_dict.get("foundation", ""),
-                        ip=candidate_dict.get("address", candidate_dict.get("ip", "")),
-                        port=candidate_dict.get("port", 0),
-                        priority=candidate_dict.get("priority", 0),
-                        protocol=candidate_dict.get("protocol", "udp"),
-                        type=candidate_dict.get("type", "host"),
-                        sdpMid=candidate_dict.get("sdpMid"),
-                        sdpMLineIndex=candidate_dict.get("sdpMLineIndex")
-                    )
-                    await pc.addIceCandidate(candidate)
+                    # Handle control messages if needed
+                    if data.get("type") == "ping":
+                        await websocket.send_text(json.dumps({"type": "pong"}))
+
+                except:
+                    # Connection closed
+                    break
 
     except WebSocketDisconnect:
         print(f"👤 Client {client_id} disconnected")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error with client {client_id}: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        await pc.close()
-        depth_server.pcs.discard(pc)
-        print(f"👤 Total connections: {len(depth_server.pcs)}")
+        # Clean up
+        if client_id in depth_server.active_processors:
+            del depth_server.active_processors[client_id]
+        print(f"👤 Total active clients: {len(depth_server.active_processors)}")
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="WebRTC depth streaming server")
+    parser = argparse.ArgumentParser(description="WebSocket depth streaming server")
     parser.add_argument(
         "--model",
         choices=["small", "base"],
@@ -357,7 +290,7 @@ if __name__ == "__main__":
     # Initialize depth server
     depth_server = CloudDepthServer(model_size=args.model, device=args.device)
 
-    print(f"🌐 Starting WebRTC server on {args.host}:{args.port}")
+    print(f"🌐 Starting WebSocket server on {args.host}:{args.port}")
     print(f"📄 Viewer available at: http://{args.host}:{args.port}/")
 
     # Start FastAPI server
