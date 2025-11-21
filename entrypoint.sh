@@ -17,7 +17,7 @@ cd /opt/depth-streaming/app
 python3 -c "import torch; print(f'✅ PyTorch {torch.__version__}'); print(f'🖥️  CUDA available: {torch.cuda.is_available()}'); print(f'📊 GPU count: {torch.cuda.device_count()}'); print(f'🎯 Current device: {torch.cuda.current_device() if torch.cuda.is_available() else \"CPU\"}'); print(f'💾 GPU name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
 
 # Default model and device from environment variables
-MODEL=${MODEL:-base}
+MODEL=${MODEL:-giant}
 DEVICE=${DEVICE:-cuda}
 HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-8000}
