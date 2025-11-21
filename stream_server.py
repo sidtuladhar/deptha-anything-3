@@ -25,6 +25,107 @@ from depth_anything_3.api import DepthAnything3
 logging.basicConfig(level=logging.WARNING)
 
 
+# =========================
+# Multi-view Fusion Helper Functions (from export_to_glb)
+# =========================
+
+
+def _as_homogeneous44(ext: np.ndarray) -> np.ndarray:
+    """
+    Accept (4,4) or (3,4) extrinsic parameters, return (4,4) homogeneous matrix.
+    """
+    if ext.shape == (4, 4):
+        return ext
+    if ext.shape == (3, 4):
+        H = np.eye(4, dtype=ext.dtype)
+        H[:3, :4] = ext
+        return H
+    raise ValueError(f"extrinsic must be (4,4) or (3,4), got {ext.shape}")
+
+
+def _depths_to_world_points_with_colors(
+    depth: np.ndarray,
+    K: np.ndarray,
+    ext_w2c: np.ndarray,
+    images_u8: np.ndarray,
+    conf: np.ndarray | None,
+    conf_thr: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    For each frame, transform (u,v,1) through K^{-1} to get rays,
+    multiply by depth to camera frame, then use (w2c)^{-1} to transform to world frame.
+    Simultaneously extract colors.
+
+    This is the CORE multi-view fusion algorithm - transforms all camera point clouds
+    to world coordinates and merges them.
+    """
+    N, H, W = depth.shape
+    us, vs = np.meshgrid(np.arange(W), np.arange(H))
+    ones = np.ones_like(us)
+    pix = np.stack([us, vs, ones], axis=-1).reshape(-1, 3)  # (H*W,3)
+
+    pts_all, col_all = [], []
+
+    for i in range(N):
+        d = depth[i]  # (H,W)
+        valid = np.isfinite(d) & (d > 0)
+        if conf is not None:
+            valid &= conf[i] >= conf_thr
+        if not np.any(valid):
+            continue
+
+        d_flat = d.reshape(-1)
+        vidx = np.flatnonzero(valid.reshape(-1))
+
+        K_inv = np.linalg.inv(K[i])  # (3,3)
+        c2w = np.linalg.inv(_as_homogeneous44(ext_w2c[i]))  # (4,4)
+
+        rays = K_inv @ pix[vidx].T  # (3,M)
+        Xc = rays * d_flat[vidx][None, :]  # (3,M)
+        Xc_h = np.vstack([Xc, np.ones((1, Xc.shape[1]))])
+        Xw = (c2w @ Xc_h)[:3].T.astype(np.float32)  # (M,3)
+
+        cols = images_u8[i].reshape(-1, 3)[vidx].astype(np.uint8)  # (M,3)
+
+        pts_all.append(Xw)
+        col_all.append(cols)
+
+    if len(pts_all) == 0:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
+
+    return np.concatenate(pts_all, 0), np.concatenate(col_all, 0)
+
+
+def _filter_and_downsample(points: np.ndarray, colors: np.ndarray, num_max: int):
+    """Remove invalid points and downsample to max count for streaming performance"""
+    if points.shape[0] == 0:
+        return points, colors
+    finite = np.isfinite(points).all(axis=1)
+    points, colors = points[finite], colors[finite]
+    if points.shape[0] > num_max:
+        idx = np.random.choice(points.shape[0], num_max, replace=False)
+        points, colors = points[idx], colors[idx]
+    return points, colors
+
+
+def get_conf_thresh(
+    conf: np.ndarray,
+    base_thresh: float,
+    conf_thresh_percentile: float = 40.0,
+    ensure_thresh_percentile: float = 90.0,
+) -> float:
+    """Calculate adaptive confidence threshold based on percentiles"""
+    lower = np.percentile(conf, conf_thresh_percentile)
+    upper = np.percentile(conf, ensure_thresh_percentile)
+    conf_thresh = min(max(base_thresh, lower), upper)
+    return conf_thresh
+
+
+# =========================
+# Frame and Connection Classes
+# =========================
+
+
 @dataclass
 class TimestampedFrame:
     """Frame with high-precision timestamp for synchronization"""
@@ -476,13 +577,19 @@ class CloudDepthServer:
 
     def process_multiview_to_pointcloud(self, rgb_images: List[np.ndarray]):
         """
-        Process multiple synchronized frames for multi-view depth reconstruction
+        Process multiple synchronized frames for multi-view depth reconstruction using proper fusion
+
+        Uses the official fusion algorithm from export_to_glb to:
+        1. Transform each camera's depth map to world coordinates using auto-estimated extrinsics
+        2. Merge all cameras' point clouds in world space
+        3. Apply confidence filtering to remove low-quality points
+        4. Downsample for streaming performance
 
         Args:
             rgb_images: List of RGB images from different cameras (as numpy arrays)
 
         Returns:
-            Merged point cloud (points, colors, intrinsics)
+            Merged point cloud (points, colors, intrinsics) from all cameras
         """
         if len(rgb_images) < 2:
             raise ValueError(f"Multi-view requires at least 2 images, got {len(rgb_images)}")
@@ -490,90 +597,87 @@ class CloudDepthServer:
         # Convert all images to PIL
         pil_images = [Image.fromarray(img) for img in rgb_images]
 
-        # Run multi-view inference - DepthAnything v3 supports list of images
-        print(f"🎥 Processing {len(pil_images)} views for multi-view reconstruction...")
+        # Run multi-view inference - DepthAnything v3 auto-estimates extrinsics
+        print(f"🎥 Processing {len(pil_images)} views for multi-view fusion...")
         prediction = self.model.inference(
             pil_images,  # Pass list of images for multi-view
             export_dir=None,
             export_format=[],
         )
 
-        # Process each view and merge point clouds
-        all_points = []
-        all_colors = []
+        # Validate that we have extrinsics (auto-estimated by model's camera decoder)
+        if prediction.extrinsics is None:
+            raise ValueError(
+                "Model did not estimate camera extrinsics. "
+                "Make sure you're using a model with camera decoder (da3-base/large/giant)."
+            )
 
-        for idx in range(len(pil_images)):
-            # Extract depth and intrinsics for this view
-            depth_map = prediction.depth[idx]
-            if torch.is_tensor(depth_map):
-                depth_map = depth_map.cpu().numpy()
+        print(f"✅ Model auto-estimated extrinsics for {len(pil_images)} cameras")
 
-            intrinsics = prediction.intrinsics[idx]
-            if torch.is_tensor(intrinsics):
-                intrinsics = intrinsics.cpu().numpy()
+        # Convert all tensors to numpy arrays
+        depth = prediction.depth
+        if torch.is_tensor(depth):
+            depth = depth.cpu().numpy()
 
-            # Get confidence if available
-            confidence = None
-            if hasattr(prediction, "conf") and prediction.conf is not None:
-                conf = prediction.conf[idx]
-                confidence = conf.cpu().numpy() if torch.is_tensor(conf) else conf
-
-            # Extract camera parameters
-            fx, fy = intrinsics[0, 0], intrinsics[1, 1]
-            cx, cy = intrinsics[0, 2], intrinsics[1, 2]
-
-            # Generate point cloud for this view
-            h, w = depth_map.shape
-            rgb_image = rgb_images[idx]
-
-            # Resize RGB if needed
-            if rgb_image.shape[0] != h or rgb_image.shape[1] != w:
-                rgb_image = np.array(Image.fromarray(rgb_image).resize((w, h), Image.BILINEAR))
-
-            downsample = 2  # Less aggressive for multi-view
-
-            # Create mesh grid
-            xx, yy = np.meshgrid(np.arange(0, w, downsample), np.arange(0, h, downsample))
-
-            # Get depth values
-            z = depth_map[yy, xx]
-
-            # Filter by confidence
-            if confidence is not None:
-                conf_threshold = 0.6  # Higher threshold for multi-view
-                conf_values = confidence[yy, xx]
-                valid_mask = conf_values > conf_threshold
-                xx = xx[valid_mask]
-                yy = yy[valid_mask]
-                z = z[valid_mask]
-
-            # Calculate 3D coordinates
-            x = (xx - cx) * z / fx
-            y = -((yy - cy) * z / fy)
-
-            # Get colors
-            colors = rgb_image[yy, xx]
-
-            # Stack into point cloud
-            points = np.stack([x, y, z], axis=-1).astype(np.float32)
-
-            all_points.append(points)
-            all_colors.append(colors.astype(np.uint8))
-
-        # Merge all point clouds
-        merged_points = np.concatenate(all_points, axis=0)
-        merged_colors = np.concatenate(all_colors, axis=0)
-
-        # Use intrinsics from first view (they should be similar)
-        intrinsics = prediction.intrinsics[0]
+        intrinsics = prediction.intrinsics
         if torch.is_tensor(intrinsics):
             intrinsics = intrinsics.cpu().numpy()
 
-        print(
-            f"✅ Multi-view reconstruction: {len(merged_points):,} points from {len(pil_images)} views"
+        extrinsics = prediction.extrinsics
+        if torch.is_tensor(extrinsics):
+            extrinsics = extrinsics.cpu().numpy()
+
+        conf = None
+        if hasattr(prediction, "conf") and prediction.conf is not None:
+            conf = prediction.conf
+            if torch.is_tensor(conf):
+                conf = conf.cpu().numpy()
+
+        # Prepare processed images (resize to match depth map size if needed)
+        N, H, W = depth.shape
+        images_u8 = []
+        for i, rgb_img in enumerate(rgb_images):
+            if rgb_img.shape[0] != H or rgb_img.shape[1] != W:
+                rgb_img = np.array(Image.fromarray(rgb_img).resize((W, H), Image.BILINEAR))
+            images_u8.append(rgb_img)
+        images_u8 = np.stack(images_u8, axis=0).astype(np.uint8)  # (N, H, W, 3)
+
+        # Calculate adaptive confidence threshold
+        base_conf_threshold = 0.5
+        if conf is not None:
+            conf_threshold = get_conf_thresh(
+                conf.reshape(-1),  # Flatten all confidence values
+                base_conf_threshold,
+                conf_thresh_percentile=40.0,
+                ensure_thresh_percentile=90.0,
+            )
+            print(f"📊 Using adaptive confidence threshold: {conf_threshold:.3f}")
+        else:
+            conf_threshold = base_conf_threshold
+
+        # CORE FUSION: Transform all cameras to world space and merge
+        print(f"🔄 Fusing {len(pil_images)} camera point clouds in world space...")
+        points, colors = _depths_to_world_points_with_colors(
+            depth=depth,  # (N, H, W) - ALL cameras
+            K=intrinsics,  # (N, 3, 3) - ALL camera intrinsics
+            ext_w2c=extrinsics,  # (N, 4, 4) or (N, 3, 4) - Auto-estimated poses
+            images_u8=images_u8,  # (N, H, W, 3) - ALL camera images
+            conf=conf,  # (N, H, W) - Confidence maps
+            conf_thr=conf_threshold,
         )
 
-        return merged_points, merged_colors, intrinsics
+        # Downsample for streaming performance (100k points = smooth 30 FPS)
+        num_max_points = 100_000
+        points, colors = _filter_and_downsample(points, colors, num_max_points)
+
+        # Use primary camera's intrinsics for reference
+        primary_intrinsics = intrinsics[0]
+
+        print(
+            f"✅ Multi-view fusion complete: {len(points):,} points from {len(pil_images)} cameras"
+        )
+
+        return points, colors, primary_intrinsics
 
 
 # Create FastAPI app
