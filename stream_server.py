@@ -141,8 +141,7 @@ class CloudDepthServer:
         if self.device.type == "cuda":
             print(f"⚡ GPU-accelerated point cloud generation enabled (CUDA)")
         elif self.device.type == "mps":
-            print(f"🍎 MPS detected - using CPU fallback for point cloud generation")
-            print(f"   (GPU acceleration only available with CUDA on production)")
+            print(f"⚡ GPU-accelerated point cloud generation enabled (MPS)")
         else:
             print(f"⚠️  Using CPU for point cloud generation")
 
@@ -152,12 +151,20 @@ class CloudDepthServer:
         """GPU-accelerated point cloud generation - keeps tensors on GPU"""
         # Get depth map and intrinsics (keep as tensors on GPU!)
         depth_map = prediction.depth[0]
+        # Ensure it's a tensor (not numpy)
+        if not torch.is_tensor(depth_map):
+            depth_map = torch.from_numpy(depth_map).to(self.device)
 
         confidence = None
         if hasattr(prediction, "conf") and prediction.conf is not None:
             confidence = prediction.conf[0]
+            if not torch.is_tensor(confidence):
+                confidence = torch.from_numpy(confidence).to(self.device)
 
         intrinsics = prediction.intrinsics[0]
+        # Ensure it's a tensor
+        if not torch.is_tensor(intrinsics):
+            intrinsics = torch.from_numpy(intrinsics).to(self.device)
 
         # Extract camera parameters (move scalars to CPU)
         fx = intrinsics[0, 0].item()
@@ -184,14 +191,23 @@ class CloudDepthServer:
         y_coords = torch.arange(0, h, downsample, device=self.device)
         yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
 
-        # Get depth values (GPU indexing)
-        z = depth_map[yy, xx]
+        # Flatten indices for compatible indexing (works across PyTorch versions)
+        yy_flat = yy.flatten()
+        xx_flat = xx.flatten()
+
+        # Convert to linear indices for 1D indexing (more compatible)
+        linear_indices = yy_flat * w + xx_flat
+
+        # Use torch.index_select to avoid NumPy conversion (MPS-safe)
+        depth_flat = depth_map.flatten()
+        z = torch.index_select(depth_flat, 0, linear_indices.long()).reshape(yy.shape)
 
         # Filter by confidence if available (all on GPU!)
         if confidence is not None:
             conf_threshold = 0.5
-            conf_values = confidence[yy, xx]
-            valid_mask = conf_values > conf_threshold
+            conf_flat = confidence.flatten()
+            conf_sampled = torch.index_select(conf_flat, 0, linear_indices.long()).reshape(yy.shape)
+            valid_mask = conf_sampled > conf_threshold
 
             # Apply mask
             xx = xx[valid_mask]
@@ -202,10 +218,14 @@ class CloudDepthServer:
         x = (xx.float() - cx) * z / fx
         y = -((yy.float() - cy) * z / fy)  # Negate Y to flip vertically
 
-        # Get colors using advanced indexing (GPU)
+        # Get colors using torch.index_select (MPS-safe)
         yy_int = yy.long()
         xx_int = xx.long()
-        colors = rgb_tensor[yy_int, xx_int]  # Shape: (N, 3)
+        # Convert to linear indices for color extraction
+        color_linear_idx = yy_int * w + xx_int
+        # Flatten RGB tensor to (H*W, 3) and use index_select
+        rgb_flat = rgb_tensor.reshape(-1, 3)
+        colors = torch.index_select(rgb_flat, 0, color_linear_idx)  # Shape: (N, 3)
 
         # Stack into point cloud (still on GPU)
         points = torch.stack([x, y, z], dim=-1)  # Shape: (N, 3)
@@ -229,8 +249,8 @@ class CloudDepthServer:
             export_format=[],
         )
 
-        # Use GPU-accelerated version only for CUDA (not MPS due to indexing limitations)
-        if self.device.type == "cuda":
+        # Use GPU-accelerated version for CUDA and MPS
+        if self.device.type in ['cuda', 'mps']:
             return self.process_frame_to_pointcloud_gpu(rgb_image, prediction)
 
         # Fallback to CPU version
