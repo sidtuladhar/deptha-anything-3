@@ -21,6 +21,7 @@ class DepthProcessor:
     """
     Processes incoming JPEG frames with depth estimation
     """
+
     def __init__(self, depth_server, websocket):
         self.depth_server = depth_server
         self.websocket = websocket
@@ -56,7 +57,9 @@ class DepthProcessor:
 
             # Calculate actual FPS
             now = datetime.now()
-            actual_fps = 1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
+            actual_fps = (
+                1.0 / (now - self.last_frame_time).total_seconds() if self.frame_count > 1 else 0
+            )
             self.last_frame_time = now
 
             print(
@@ -91,6 +94,7 @@ class DepthProcessor:
         except Exception as e:
             print(f"❌ Error processing JPEG frame: {e}")
             import traceback
+
             traceback.print_exc()
             self.is_processing = False
 
@@ -159,7 +163,7 @@ class CloudDepthServer:
         if rgb_image.shape[0] != h or rgb_image.shape[1] != w:
             rgb_image = np.array(pil_image.resize((w, h), Image.BILINEAR))
 
-        downsample = 3  # Adjust for performance (higher = fewer points, faster)
+        downsample = 3  # Optimized for 30 FPS (fewer points, much faster)
 
         # Create mesh grid
         xx, yy = np.meshgrid(np.arange(0, w, downsample), np.arange(0, h, downsample))
@@ -256,6 +260,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"❌ Error with client {client_id}: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         # Clean up
@@ -280,9 +285,7 @@ if __name__ == "__main__":
         default="cuda",
         help="Device to run on",
     )
-    parser.add_argument(
-        "--host", default="0.0.0.0", help="Host to bind to"
-    )
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
 
     args = parser.parse_args()

@@ -260,8 +260,8 @@
         try {
           stream = await navigator.mediaDevices.getUserMedia({
             video: {
-              width: 640,
-              height: 480,
+              width: 480,  // Reduced for 30 FPS
+              height: 360,
               frameRate: 30,
             },
           });
@@ -315,10 +315,10 @@
             captureCanvas.width = videoElement.videoWidth || 640;
             captureCanvas.height = videoElement.videoHeight || 480;
 
-            // Start sending frames at 10 FPS (100ms interval)
+            // Start sending frames at 30 FPS (33ms interval)
             frameSendInterval = setInterval(() => {
               sendFrame();
-            }, 66); // 10 FPS
+            }, 33); // 30 FPS
 
             console.log(
               `🎬 Sending frames at ${captureCanvas.width}x${captureCanvas.height}`,
@@ -385,8 +385,8 @@
               }
             },
             "image/jpeg",
-            0.8,
-          ); // 80% JPEG quality
+            0.7,
+          ); // 70% JPEG quality (optimized for speed)
         } catch (e) {
           console.error("Error sending frame:", e);
         }
