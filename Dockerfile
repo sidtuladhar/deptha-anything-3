@@ -44,6 +44,7 @@ COPY src/ ./src/
 COPY stream_server.py .
 COPY viewer.html .
 COPY viewer-gaussian.html .
+COPY viewer-multicam.html .
 COPY test-sparkjs.html .
 
 # Add src to Python path so imports work

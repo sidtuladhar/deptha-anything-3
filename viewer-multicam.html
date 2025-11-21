@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multi-Camera Point Cloud Viewer</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #1a1a1a;
+        color: #ffffff;
+        overflow: hidden;
+      }
+
+      #role-selection {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #1a1a1a;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+      }
+
+      #role-selection h1 {
+        font-size: 32px;
+        margin-bottom: 20px;
+        color: #4caf50;
+      }
+
+      #role-selection p {
+        font-size: 16px;
+        color: #aaa;
+        margin-bottom: 40px;
+        text-align: center;
+        max-width: 500px;
+      }
+
+      .role-buttons {
+        display: flex;
+        gap: 30px;
+      }
+
+      .role-card {
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid #333;
+        border-radius: 15px;
+        padding: 40px;
+        width: 250px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.3s ease;
+      }
+
+      .role-card:hover {
+        border-color: #4caf50;
+        background: rgba(76, 175, 80, 0.1);
+        transform: translateY(-5px);
+      }
+
+      .role-card h2 {
+        font-size: 24px;
+        margin-bottom: 15px;
+        color: #fff;
+      }
+
+      .role-card .icon {
+        font-size: 48px;
+        margin-bottom: 20px;
+      }
+
+      .role-card .description {
+        font-size: 14px;
+        color: #aaa;
+        line-height: 1.5;
+      }
+
+      #container {
+        width: 100vw;
+        height: 100vh;
+        position: relative;
+        display: none;
+      }
+
+      #canvas-container {
+        width: 100%;
+        height: 100%;
+      }
+
+      #info-panel {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 20px;
+        border-radius: 10px;
+        backdrop-filter: blur(10px);
+        min-width: 250px;
+      }
+
+      h1 {
+        font-size: 18px;
+        margin-bottom: 15px;
+        color: #4caf50;
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        margin-bottom: 10px;
+        font-size: 14px;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 10px;
+        transition: background-color 0.3s;
+      }
+
+      .status-dot.connected {
+        background-color: #4caf50;
+        box-shadow: 0 0 10px #4caf50;
+      }
+
+      .status-dot.disconnected {
+        background-color: #f44336;
+      }
+
+      .stat {
+        font-size: 13px;
+        margin: 5px 0;
+        color: #aaa;
+      }
+
+      .stat strong {
+        color: #fff;
+      }
+
+      #controls {
+        position: absolute;
+        bottom: 20px;
+        left: 20px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 15px;
+        border-radius: 10px;
+        backdrop-filter: blur(10px);
+        font-size: 12px;
+        color: #aaa;
+      }
+
+      #controls div {
+        margin: 5px 0;
+      }
+
+      .error-message {
+        color: #f44336;
+        margin-top: 10px;
+        font-size: 12px;
+      }
+
+      #webcam-preview {
+        position: absolute;
+        top: 20px;
+        right: 20px;
+        width: 320px;
+        height: 240px;
+        border: 2px solid #4caf50;
+        border-radius: 8px;
+        display: none;
+        transform: scaleX(-1);
+      }
+
+      /* Camera mode - larger preview */
+      #container.camera-mode #webcam-preview {
+        width: 640px;
+        height: 480px;
+      }
+
+      #container.camera-mode #canvas-container {
+        display: none;
+      }
+
+      #container.camera-mode #controls {
+        display: none;
+      }
+
+      button {
+        background: #4caf50;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        margin-top: 10px;
+      }
+
+      button:hover {
+        background: #45a049;
+      }
+
+      button:disabled {
+        background: #666;
+        cursor: not-allowed;
+      }
+
+      .camera-list {
+        margin-top: 15px;
+        padding-top: 10px;
+        border-top: 1px solid #333;
+      }
+
+      .camera-item {
+        display: flex;
+        align-items: center;
+        padding: 8px;
+        margin: 5px 0;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 5px;
+        font-size: 12px;
+      }
+
+      .camera-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #4caf50;
+        margin-right: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Role Selection Screen -->
+    <div id="role-selection">
+      <h1>🎥 Multi-Camera Point Cloud System</h1>
+      <p>
+        Choose your role: Viewers see the unified 3D point cloud, while Cameras
+        contribute video streams for depth reconstruction.
+      </p>
+      <div class="role-buttons">
+        <div class="role-card" id="viewer-card">
+          <div class="icon">👁️</div>
+          <h2>Viewer</h2>
+          <p class="description">
+            View the live 3D point cloud reconstructed from all camera feeds.
+            Full controls and visualization.
+          </p>
+        </div>
+        <div class="role-card" id="camera-card">
+          <div class="icon">📹</div>
+          <h2>Camera</h2>
+          <p class="description">
+            Contribute your webcam stream to the multi-view reconstruction.
+            Shows preview and status only.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Application -->
+    <div id="container">
+      <div id="canvas-container"></div>
+
+      <video id="webcam-preview" autoplay playsinline muted></video>
+
+      <div id="info-panel">
+        <h1 id="title">Multi-Camera Point Cloud</h1>
+        <div class="status">
+          <div class="status-dot" id="status-dot"></div>
+          <span id="status-text">Click Start to begin</span>
+        </div>
+        <button id="start-btn">Start Webcam</button>
+        <div class="stat">Role: <strong id="role-display">-</strong></div>
+        <div class="stat" id="point-count-stat">
+          Points: <strong id="point-count">0</strong>
+        </div>
+        <div class="stat">FPS: <strong id="fps">0</strong></div>
+        <div class="camera-list" id="camera-list-container" style="display: none">
+          <div style="font-weight: bold; margin-bottom: 5px; font-size: 11px; color: #888;">
+            Active Cameras:
+          </div>
+          <div id="camera-list"></div>
+        </div>
+        <div class="error-message" id="error" style="display: none"></div>
+      </div>
+
+      <div id="controls">
+        <div><strong>Controls:</strong></div>
+        <div>🖱️ Left drag: Rotate</div>
+        <div>🖱️ Right drag: Pan</div>
+        <div>🖱️ Scroll: Zoom</div>
+      </div>
+    </div>
+
+    <!-- MessagePack for binary decoding -->
+    <script src="https://cdn.jsdelivr.net/npm/msgpack-lite@0.1.26/dist/msgpack.min.js"></script>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      // Client role: "viewer" or "camera"
+      let clientRole = null;
+
+      // WebSocket connection
+      let ws = null;
+      let frameSendInterval = null;
+
+      // Webcam
+      let stream = null;
+      let videoElement = document.getElementById("webcam-preview");
+
+      // Canvas for frame capture (hidden)
+      let captureCanvas = document.createElement("canvas");
+      let captureCtx = captureCanvas.getContext("2d");
+
+      // Three.js setup (for viewer mode)
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1a1a1a);
+
+      const camera = new THREE.PerspectiveCamera(
+        75,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+      camera.position.set(0, 0, 3);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      document
+        .getElementById("canvas-container")
+        .appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      // Add grid helper
+      const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
+      scene.add(gridHelper);
+
+      // Add axes helper
+      const axesHelper = new THREE.AxesHelper(1);
+      scene.add(axesHelper);
+
+      // Point cloud
+      let pointCloud = null;
+      let geometry = null;
+
+      // Stats
+      let frameCount = 0;
+      let lastTime = Date.now();
+      let fps = 0;
+
+      // UI elements
+      const roleSelection = document.getElementById("role-selection");
+      const container = document.getElementById("container");
+      const statusDot = document.getElementById("status-dot");
+      const statusText = document.getElementById("status-text");
+      const pointCountEl = document.getElementById("point-count");
+      const pointCountStat = document.getElementById("point-count-stat");
+      const fpsEl = document.getElementById("fps");
+      const errorEl = document.getElementById("error");
+      const startBtn = document.getElementById("start-btn");
+      const roleDisplay = document.getElementById("role-display");
+      const cameraListContainer = document.getElementById(
+        "camera-list-container",
+      );
+      const cameraList = document.getElementById("camera-list");
+
+      // Role selection
+      document.getElementById("viewer-card").addEventListener("click", () => {
+        selectRole("viewer");
+      });
+
+      document.getElementById("camera-card").addEventListener("click", () => {
+        selectRole("camera");
+      });
+
+      async function selectRole(role) {
+        clientRole = role;
+        roleSelection.style.display = "none";
+        container.style.display = "block";
+
+        roleDisplay.textContent = role === "viewer" ? "Viewer 👁️" : "Camera 📹";
+
+        if (role === "camera") {
+          container.classList.add("camera-mode");
+          pointCountStat.style.display = "none";
+        } else {
+          // Viewer mode - hide webcam controls, show camera list
+          cameraListContainer.style.display = "block";
+          document.getElementById("start-btn").style.display = "none";
+          videoElement.style.display = "none";
+
+          // Auto-connect viewer without requiring button click
+          updateStatus(false, "Connecting...");
+          await connectWebSocket();
+        }
+      }
+
+      function updateStatus(connected, message) {
+        if (connected) {
+          statusDot.classList.add("connected");
+          statusDot.classList.remove("disconnected");
+          statusText.textContent = "Connected";
+          errorEl.style.display = "none";
+        } else {
+          statusDot.classList.remove("connected");
+          statusDot.classList.add("disconnected");
+          statusText.textContent = message || "Disconnected";
+          if (message && message.includes("Error")) {
+            errorEl.textContent = message;
+            errorEl.style.display = "block";
+          }
+        }
+      }
+
+      function updateCameraList(cameras) {
+        cameraList.innerHTML = "";
+        cameras.forEach((cam, idx) => {
+          const item = document.createElement("div");
+          item.className = "camera-item";
+          item.innerHTML = `
+            <div class="camera-dot"></div>
+            <span>Camera ${idx + 1}</span>
+          `;
+          cameraList.appendChild(item);
+        });
+
+        // Update status message based on camera count
+        if (clientRole === "viewer") {
+          if (cameras.length === 0) {
+            statusText.textContent = "Waiting for cameras...";
+          } else {
+            statusText.textContent = `Receiving from ${cameras.length} camera${cameras.length > 1 ? 's' : ''}`;
+          }
+        }
+      }
+
+      async function startWebcam() {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: 640,
+              height: 480,
+              frameRate: 30,
+            },
+          });
+          videoElement.srcObject = stream;
+          videoElement.style.display = "block";
+
+          await new Promise((resolve) => {
+            videoElement.onloadedmetadata = () => {
+              videoElement.play();
+              resolve();
+            };
+          });
+
+          startBtn.textContent = "Stop";
+          startBtn.disabled = false;
+          return true;
+        } catch (error) {
+          console.error("Webcam error:", error);
+          updateStatus(false, "Webcam access denied");
+          startBtn.disabled = false;
+          return false;
+        }
+      }
+
+      function stopWebcam() {
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          videoElement.srcObject = null;
+          videoElement.style.display = "none";
+          stream = null;
+        }
+        startBtn.textContent = "Start Webcam";
+      }
+
+      async function connectWebSocket() {
+        try {
+          const protocol =
+            window.location.protocol === "https:" ? "wss:" : "ws:";
+          const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+          console.log("Connecting to WebSocket:", wsUrl);
+          ws = new WebSocket(wsUrl);
+          ws.binaryType = "arraybuffer";
+
+          ws.onopen = () => {
+            console.log("✅ WebSocket connected!");
+            updateStatus(true, "Connected");
+
+            // Send role registration message with timestamp for sync
+            const registrationMsg = {
+              type: "register_role",
+              role: clientRole,
+              timestamp: performance.timeOrigin + performance.now(),
+            };
+            ws.send(JSON.stringify(registrationMsg));
+            console.log(`📝 Registered as ${clientRole} with timestamp ${registrationMsg.timestamp}`);
+
+            // Only start frame sending for camera clients
+            if (clientRole === "camera") {
+              // Set canvas size to match video
+              captureCanvas.width = videoElement.videoWidth || 640;
+              captureCanvas.height = videoElement.videoHeight || 480;
+
+              // Start sending frames at 30 FPS
+              frameSendInterval = setInterval(() => {
+                sendFrame();
+              }, 33);
+
+              console.log(
+                `🎬 Sending frames as camera at ${captureCanvas.width}x${captureCanvas.height}`,
+              );
+            } else {
+              console.log("👁️  Viewer mode - waiting for point clouds...");
+            }
+          };
+
+          ws.onmessage = async (event) => {
+            try {
+              // Handle binary messages (point cloud data)
+              if (event.data instanceof ArrayBuffer) {
+                const data = msgpack.decode(new Uint8Array(event.data));
+
+                if (data.type === "pointcloud" && clientRole === "viewer") {
+                  console.log(`☁️  Point cloud received: ${data.num_points} points from ${data.num_views} view(s)`);
+                  processPointCloudData(data);
+                }
+                return;
+              }
+
+              // Handle text messages (control/status)
+              const data = JSON.parse(event.data);
+
+              if (data.type === "camera_list" && clientRole === "viewer") {
+                console.log(`📡 Camera list update: ${data.count} cameras`, data.cameras);
+                updateCameraList(data.cameras);
+              } else if (data.type === "pong") {
+                console.log("Pong received");
+              }
+            } catch (e) {
+              console.error("Error handling message:", e);
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error("WebSocket error:", error);
+            updateStatus(false, "Connection Error");
+          };
+
+          ws.onclose = () => {
+            console.log("WebSocket disconnected");
+            updateStatus(false, "Disconnected");
+            if (frameSendInterval) {
+              clearInterval(frameSendInterval);
+              frameSendInterval = null;
+            }
+          };
+        } catch (e) {
+          console.error("Failed to establish WebSocket:", e);
+          updateStatus(false, "Error: " + e.message);
+        }
+      }
+
+      function sendFrame() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!videoElement.videoWidth) return;
+        if (clientRole !== "camera") return; // Safety check
+
+        try {
+          // Draw video frame to canvas
+          captureCtx.drawImage(
+            videoElement,
+            0,
+            0,
+            captureCanvas.width,
+            captureCanvas.height,
+          );
+
+          // Convert canvas to JPEG blob and send as raw bytes
+          // Server will identify camera clients by their registered role
+          captureCanvas.toBlob(
+            (blob) => {
+              if (blob && ws.readyState === WebSocket.OPEN) {
+                ws.send(blob);
+              }
+            },
+            "image/jpeg",
+            0.7,
+          );
+        } catch (e) {
+          console.error("Error sending frame:", e);
+        }
+      }
+
+      function processPointCloudData(data) {
+        if (data.type === "pointcloud") {
+          updatePointCloud(data);
+
+          // Update stats
+          frameCount++;
+          const now = Date.now();
+          if (now - lastTime >= 1000) {
+            fps = frameCount;
+            frameCount = 0;
+            lastTime = now;
+            fpsEl.textContent = fps;
+          }
+        }
+      }
+
+      function updatePointCloud(data) {
+        // Remove old point cloud
+        if (pointCloud) {
+          scene.remove(pointCloud);
+          if (geometry) geometry.dispose();
+        }
+
+        let positions, colorArray;
+
+        const points = data.points;
+        const colors = data.colors;
+
+        if (!points || points.length === 0) {
+          return;
+        }
+
+        // Check if points is a binary buffer (Uint8Array) or array
+        if (points instanceof Uint8Array || points.buffer) {
+          // Binary format - convert to Float32Array
+          const pointsBuffer =
+            points instanceof Uint8Array ? points.buffer : points;
+          positions = new Float32Array(pointsBuffer);
+
+          // Colors are uint8, convert to float32 and normalize
+          const colorsBuffer =
+            colors instanceof Uint8Array ? colors.buffer : colors;
+          const colorsUint8 = new Uint8Array(colorsBuffer);
+          colorArray = new Float32Array(colorsUint8.length);
+          for (let i = 0; i < colorsUint8.length; i++) {
+            colorArray[i] = colorsUint8[i] / 255;
+          }
+
+          // Flip Z axis for depth
+          const numPoints = positions.length / 3;
+          for (let i = 0; i < numPoints; i++) {
+            positions[i * 3 + 2] = -positions[i * 3 + 2];
+          }
+        } else if (typeof points[0] === "number") {
+          // Flattened list format (legacy)
+          positions = new Float32Array(points);
+
+          colorArray = new Float32Array(colors.length);
+          for (let i = 0; i < colors.length; i++) {
+            colorArray[i] = colors[i] / 255;
+          }
+
+          const numPoints = positions.length / 3;
+          for (let i = 0; i < numPoints; i++) {
+            positions[i * 3 + 2] = -positions[i * 3 + 2];
+          }
+        } else {
+          // Nested array format (fallback)
+          positions = new Float32Array(points.length * 3);
+          colorArray = new Float32Array(colors.length * 3);
+
+          for (let i = 0; i < points.length; i++) {
+            positions[i * 3] = points[i][0];
+            positions[i * 3 + 1] = points[i][1];
+            positions[i * 3 + 2] = -points[i][2];
+          }
+
+          for (let i = 0; i < colors.length; i++) {
+            colorArray[i * 3] = colors[i][0] / 255;
+            colorArray[i * 3 + 1] = colors[i][1] / 255;
+            colorArray[i * 3 + 2] = colors[i][2] / 255;
+          }
+        }
+
+        // Create new geometry
+        geometry = new THREE.BufferGeometry();
+
+        geometry.setAttribute(
+          "position",
+          new THREE.BufferAttribute(positions, 3),
+        );
+        geometry.setAttribute(
+          "color",
+          new THREE.BufferAttribute(colorArray, 3),
+        );
+
+        // Create material
+        const material = new THREE.PointsMaterial({
+          size: 0.003,
+          vertexColors: true,
+          sizeAttenuation: true,
+        });
+
+        // Create point cloud
+        pointCloud = new THREE.Points(geometry, material);
+        scene.add(pointCloud);
+
+        // Update UI
+        pointCountEl.textContent = data.num_points.toLocaleString();
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        if (clientRole === "viewer") {
+          controls.update();
+          renderer.render(scene, camera);
+        }
+      }
+
+      // Handle window resize
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // Event listeners
+      startBtn.addEventListener("click", async () => {
+        if (clientRole === "viewer") {
+          // Viewers connect immediately without webcam
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            startBtn.disabled = true;
+            startBtn.textContent = "Connecting...";
+            await connectWebSocket();
+            startBtn.style.display = "none"; // Hide button after connecting
+          }
+        } else {
+          // Camera clients need webcam
+          if (!stream) {
+            startBtn.disabled = true;
+            startBtn.textContent = "Starting...";
+            const webcamOk = await startWebcam();
+            if (webcamOk) {
+              await connectWebSocket();
+            }
+          } else {
+            stopWebcam();
+            if (frameSendInterval) {
+              clearInterval(frameSendInterval);
+              frameSendInterval = null;
+            }
+            if (ws) ws.close();
+          }
+        }
+      });
+
+      // Start animation loop
+      animate();
+    </script>
+  </body>
+</html>
