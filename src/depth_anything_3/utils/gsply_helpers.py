@@ -13,6 +13,7 @@
 # limitations under the License.
 from pathlib import Path
 from typing import Optional
+from io import BytesIO
 import numpy as np
 import torch
 from einops import rearrange, repeat
@@ -171,3 +172,136 @@ def save_gaussian_ply(
         save_sh_dc_only=save_sh_dc_only,
         match_3dgs_mcmc_dev=match_3dgs_mcmc_dev,
     )
+
+
+def save_gaussian_ply_bytes(
+    gaussians: Gaussians,
+    ctx_depth: torch.Tensor,  # depth of input views; for getting shape and filtering, "v h w 1"
+    shift_and_scale: bool = False,
+    save_sh_dc_only: bool = True,
+    gs_views_interval: int = 1,
+    inv_opacity: Optional[bool] = True,
+    prune_by_depth_percent: Optional[float] = 1.0,
+    prune_border_gs: Optional[bool] = True,
+    prune_by_opacity: float = 0.1,  # NEW: prune low-opacity Gaussians
+    match_3dgs_mcmc_dev: Optional[bool] = False,
+) -> bytes:
+    """
+    Generate PLY file bytes for Gaussian splats (for streaming).
+
+    Returns PLY file content as bytes instead of writing to disk.
+    Adds opacity-based pruning to reduce Gaussian count for streaming.
+    """
+    b = gaussians.means.shape[0]
+    assert b == 1, "must set batch_size=1 when exporting 3D gaussians"
+    src_v, out_h, out_w, _ = ctx_depth.shape
+
+    # extract gs params
+    world_means = gaussians.means
+    world_shs = gaussians.harmonics
+    world_rotations = gaussians.rotations
+    gs_scales = gaussians.scales
+    gs_opacities = inverse_sigmoid(gaussians.opacities) if inv_opacity else gaussians.opacities
+
+    # Create a mask to filter the Gaussians.
+
+    # throw away Gaussians at the borders, since they're generally of lower quality.
+    if prune_border_gs:
+        mask = torch.zeros_like(ctx_depth, dtype=torch.bool)
+        gstrim_h = int(8 / 256 * out_h)
+        gstrim_w = int(8 / 256 * out_w)
+        mask[:, gstrim_h:-gstrim_h, gstrim_w:-gstrim_w, :] = 1
+    else:
+        mask = torch.ones_like(ctx_depth, dtype=torch.bool)
+
+    # trim the far away point based on depth;
+    if prune_by_depth_percent is not None and prune_by_depth_percent < 1:
+        in_depths = ctx_depth
+        d_percentile = torch.quantile(
+            in_depths.view(in_depths.shape[0], -1), q=prune_by_depth_percent, dim=1
+        ).view(-1, 1, 1)
+        d_mask = (in_depths[..., 0] <= d_percentile).unsqueeze(-1)
+        mask = mask & d_mask
+
+    # Prune low-opacity Gaussians (NEW for streaming)
+    if prune_by_opacity > 0:
+        opacity_values = gaussians.opacities[0]  # b=1, so take first batch
+        opacity_reshaped = rearrange(
+            opacity_values, "(v h w) -> v h w", v=src_v, h=out_h, w=out_w
+        )
+        opacity_mask = opacity_reshaped[::gs_views_interval] > prune_by_opacity
+        mask = mask & opacity_mask.unsqueeze(-1)
+
+    mask = mask.squeeze(-1)  # v h w
+
+    # helper fn, must place after mask
+    def trim_select_reshape(element):
+        selected_element = rearrange(
+            element[0], "(v h w) ... -> v h w ...", v=src_v, h=out_h, w=out_w
+        )
+        selected_element = selected_element[::gs_views_interval][mask[::gs_views_interval]]
+        return selected_element
+
+    # Generate PLY data in-memory
+    means_trimmed = trim_select_reshape(world_means)
+    scales_trimmed = trim_select_reshape(gs_scales)
+    rotations_trimmed = trim_select_reshape(world_rotations)
+    harmonics_trimmed = trim_select_reshape(world_shs)
+    opacities_trimmed = trim_select_reshape(gs_opacities)
+
+    # Apply shift and scale if requested
+    if shift_and_scale:
+        means_trimmed = means_trimmed - means_trimmed.median(dim=0).values
+        scale_factor = means_trimmed.abs().quantile(0.95, dim=0).max()
+        means_trimmed = means_trimmed / scale_factor
+        scales_trimmed = scales_trimmed / scale_factor
+
+    rotations_np = rotations_trimmed.detach().cpu().numpy()
+
+    # Extract SH coefficients
+    f_dc = harmonics_trimmed[..., 0]
+    f_rest = harmonics_trimmed[..., 1:].flatten(start_dim=1)
+
+    if match_3dgs_mcmc_dev:
+        sh_degree = 3
+        n_rest = 3 * (sh_degree + 1) ** 2 - 3
+        f_rest = repeat(
+            torch.zeros_like(harmonics_trimmed[..., :1]), "... i -> ... (n i)", n=(n_rest // 3)
+        ).flatten(start_dim=1)
+        dtype_full = [
+            (attribute, "f4")
+            for attribute in construct_list_of_attributes(num_rest=n_rest)
+            if attribute not in ("nx", "ny", "nz")
+        ]
+    else:
+        dtype_full = [
+            (attribute, "f4")
+            for attribute in construct_list_of_attributes(
+                0 if save_sh_dc_only else f_rest.shape[1]
+            )
+        ]
+
+    elements = np.empty(means_trimmed.shape[0], dtype=dtype_full)
+    attributes = [
+        means_trimmed.detach().cpu().numpy(),
+        torch.zeros_like(means_trimmed).detach().cpu().numpy(),
+        f_dc.detach().cpu().contiguous().numpy(),
+        f_rest.detach().cpu().contiguous().numpy(),
+        opacities_trimmed[..., None].detach().cpu().numpy(),
+        scales_trimmed.log().detach().cpu().numpy(),
+        rotations_np,
+    ]
+    if match_3dgs_mcmc_dev:
+        attributes.pop(1)  # dummy normal is not needed
+    elif save_sh_dc_only:
+        attributes.pop(3)  # remove f_rest from attributes
+
+    attributes = np.concatenate(attributes, axis=1)
+    elements[:] = list(map(tuple, attributes))
+
+    # Write to BytesIO instead of file
+    ply_bytes_io = BytesIO()
+    PlyData([PlyElement.describe(elements, "vertex")]).write(ply_bytes_io)
+    ply_bytes = ply_bytes_io.getvalue()
+
+    return ply_bytes
