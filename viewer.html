@@ -188,8 +188,8 @@
       let videoElement = document.getElementById("webcam-preview");
 
       // Canvas for frame capture (hidden)
-      let captureCanvas = document.createElement('canvas');
-      let captureCtx = captureCanvas.getContext('2d');
+      let captureCanvas = document.createElement("canvas");
+      let captureCtx = captureCanvas.getContext("2d");
 
       // Three.js setup
       const scene = new THREE.Scene();
@@ -262,7 +262,7 @@
             video: {
               width: 640,
               height: 480,
-              frameRate: 30
+              frameRate: 30,
             },
           });
           videoElement.srcObject = stream;
@@ -299,12 +299,13 @@
       async function connectWebSocket() {
         try {
           // Create WebSocket connection
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          const protocol =
+            window.location.protocol === "https:" ? "wss:" : "ws:";
           const wsUrl = `${protocol}//${window.location.host}/ws`;
 
           console.log("Connecting to WebSocket:", wsUrl);
           ws = new WebSocket(wsUrl);
-          ws.binaryType = 'arraybuffer';
+          ws.binaryType = "arraybuffer";
 
           ws.onopen = () => {
             console.log("✅ WebSocket connected!");
@@ -317,9 +318,11 @@
             // Start sending frames at 10 FPS (100ms interval)
             frameSendInterval = setInterval(() => {
               sendFrame();
-            }, 100);  // 10 FPS
+            }, 66); // 10 FPS
 
-            console.log(`🎬 Sending frames at ${captureCanvas.width}x${captureCanvas.height}`);
+            console.log(
+              `🎬 Sending frames at ${captureCanvas.width}x${captureCanvas.height}`,
+            );
           };
 
           ws.onmessage = async (event) => {
@@ -354,7 +357,6 @@
               frameSendInterval = null;
             }
           };
-
         } catch (e) {
           console.error("Failed to establish WebSocket:", e);
           updateStatus(false, "Error: " + e.message);
@@ -367,15 +369,24 @@
 
         try {
           // Draw video frame to canvas
-          captureCtx.drawImage(videoElement, 0, 0, captureCanvas.width, captureCanvas.height);
+          captureCtx.drawImage(
+            videoElement,
+            0,
+            0,
+            captureCanvas.width,
+            captureCanvas.height,
+          );
 
           // Convert canvas to JPEG blob and send
-          captureCanvas.toBlob((blob) => {
-            if (blob && ws.readyState === WebSocket.OPEN) {
-              ws.send(blob);
-            }
-          }, 'image/jpeg', 0.8);  // 80% JPEG quality
-
+          captureCanvas.toBlob(
+            (blob) => {
+              if (blob && ws.readyState === WebSocket.OPEN) {
+                ws.send(blob);
+              }
+            },
+            "image/jpeg",
+            0.8,
+          ); // 80% JPEG quality
         } catch (e) {
           console.error("Error sending frame:", e);
         }
@@ -416,11 +427,13 @@
         // Check if points is a binary buffer (Uint8Array) or array
         if (points instanceof Uint8Array || points.buffer) {
           // Binary format - convert to Float32Array
-          const pointsBuffer = points instanceof Uint8Array ? points.buffer : points;
+          const pointsBuffer =
+            points instanceof Uint8Array ? points.buffer : points;
           positions = new Float32Array(pointsBuffer);
 
           // Colors are uint8, convert to float32 and normalize
-          const colorsBuffer = colors instanceof Uint8Array ? colors.buffer : colors;
+          const colorsBuffer =
+            colors instanceof Uint8Array ? colors.buffer : colors;
           const colorsUint8 = new Uint8Array(colorsBuffer);
           colorArray = new Float32Array(colorsUint8.length);
           for (let i = 0; i < colorsUint8.length; i++) {
@@ -432,7 +445,7 @@
           for (let i = 0; i < numPoints; i++) {
             positions[i * 3 + 2] = -positions[i * 3 + 2];
           }
-        } else if (typeof points[0] === 'number') {
+        } else if (typeof points[0] === "number") {
           // Flattened list format (legacy)
           positions = new Float32Array(points);
 
