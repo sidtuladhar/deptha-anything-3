@@ -28,6 +28,7 @@ logging.basicConfig(level=logging.WARNING)
 @dataclass
 class TimestampedFrame:
     """Frame with high-precision timestamp for synchronization"""
+
     timestamp: float  # UTC milliseconds from performance API
     jpeg_bytes: bytes
     client_id: int
@@ -181,11 +182,7 @@ class MultiCameraManager:
             print(f"⚠️  Received frame from unregistered camera {client_id}")
             return
 
-        frame = TimestampedFrame(
-            timestamp=timestamp,
-            jpeg_bytes=jpeg_bytes,
-            client_id=client_id
-        )
+        frame = TimestampedFrame(timestamp=timestamp, jpeg_bytes=jpeg_bytes, client_id=client_id)
         self.camera_buffers[client_id].append(frame)
 
     def get_aligned_frames(self) -> Optional[List[TimestampedFrame]]:
@@ -215,8 +212,7 @@ class MultiCameraManager:
         # Multi-camera - find aligned frames
         # Find the most recent timestamp among the oldest frames in each buffer
         min_timestamps = [
-            self.camera_buffers[cam_id][0].timestamp
-            for cam_id in self.camera_clients
+            self.camera_buffers[cam_id][0].timestamp for cam_id in self.camera_clients
         ]
         target_timestamp = max(min_timestamps)
 
@@ -227,7 +223,7 @@ class MultiCameraManager:
 
             # Find closest frame to target timestamp
             closest_frame = None
-            closest_diff = float('inf')
+            closest_diff = float("inf")
             closest_idx = -1
 
             for idx, frame in enumerate(buffer):
@@ -304,8 +300,9 @@ class CloudDepthServer:
             print(f"⚠️  Using CPU for point cloud generation")
 
         self.active_processors = {}  # client_id -> DepthProcessor
-        self.multi_camera = MultiCameraManager(time_window_ms=500.0, max_buffer_size=1)  # Keep only latest frame
-        print(f"🎥 Multi-camera manager initialized (500ms sync window, 1-frame buffer)")
+        self.multi_camera = MultiCameraManager(
+            time_window_ms=500.0, max_buffer_size=3
+        )  # Small buffer for multi-camera alignment
 
     def process_frame_to_pointcloud_gpu(self, rgb_image, prediction):
         """GPU-accelerated point cloud generation - keeps tensors on GPU"""
@@ -572,7 +569,9 @@ class CloudDepthServer:
         if torch.is_tensor(intrinsics):
             intrinsics = intrinsics.cpu().numpy()
 
-        print(f"✅ Multi-view reconstruction: {len(merged_points):,} points from {len(pil_images)} views")
+        print(
+            f"✅ Multi-view reconstruction: {len(merged_points):,} points from {len(pil_images)} views"
+        )
 
         return merged_points, merged_colors, intrinsics
 
@@ -633,7 +632,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         depth_server.multi_camera.register_client(client_id, client_role)
 
-                        print(f"📝 Client {client_id} registered as {client_role} (timestamp: {client_timestamp})")
+                        print(
+                            f"📝 Client {client_id} registered as {client_role} (timestamp: {client_timestamp})"
+                        )
 
                         # Broadcast updated camera list to ALL viewers
                         await broadcast_camera_list_to_viewers(depth_server)
@@ -664,9 +665,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         # Debug: Log buffer status every 30 frames
                         if frame_count % 30 == 0:
-                            buffer_sizes = {cid: len(depth_server.multi_camera.camera_buffers.get(cid, []))
-                                          for cid in depth_server.multi_camera.camera_clients}
-                            print(f"📊 Buffer status: {buffer_sizes}, Viewers: {len(depth_server.multi_camera.viewer_clients)}")
+                            buffer_sizes = {
+                                cid: len(depth_server.multi_camera.camera_buffers.get(cid, []))
+                                for cid in depth_server.multi_camera.camera_clients
+                            }
+                            print(
+                                f"📊 Buffer status: {buffer_sizes}, Viewers: {len(depth_server.multi_camera.viewer_clients)}"
+                            )
 
                         # Try to process aligned frames
                         # Works with 1 camera (single-view) or 2+ cameras (multi-view)
@@ -676,14 +681,18 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Process either single-view or multi-view
                             await process_multiview_frames(aligned_frames, depth_server)
                         elif frame_count % 30 == 0:
-                            print(f"⏸️  No aligned frames available (cameras: {len(depth_server.multi_camera.camera_clients)})")
+                            print(
+                                f"⏸️  No aligned frames available (cameras: {len(depth_server.multi_camera.camera_clients)})"
+                            )
 
                     else:
                         # Legacy single-camera mode (no role registration)
                         frame_count += 1
 
                         if frame_count == 1:
-                            print(f"✅ First frame received from client {client_id} (legacy mode)!")
+                            print(
+                                f"✅ First frame received from client {client_id} (legacy mode)!"
+                            )
 
                         # Process single frame directly
                         await depth_processor.process_jpeg_frame(binary_data)
@@ -691,6 +700,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print(f"❌ Error processing binary message from {client_id}: {e}")
                     import traceback
+
                     traceback.print_exc()
 
     except WebSocketDisconnect:
@@ -702,10 +712,12 @@ async def websocket_endpoint(websocket: WebSocket):
         else:
             print(f"❌ RuntimeError with client {client_id}: {e}")
             import traceback
+
             traceback.print_exc()
     except Exception as e:
         print(f"❌ Error with client {client_id}: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         # Clean up
@@ -727,11 +739,9 @@ async def broadcast_camera_list_to_viewers(depth_server: CloudDepthServer):
     """Send updated camera list to all connected viewers"""
     try:
         camera_list = depth_server.multi_camera.get_camera_list()
-        message = json.dumps({
-            "type": "camera_list",
-            "cameras": camera_list,
-            "count": len(camera_list)
-        })
+        message = json.dumps(
+            {"type": "camera_list", "cameras": camera_list, "count": len(camera_list)}
+        )
 
         # Send to all viewer clients
         viewer_clients = depth_server.multi_camera.viewer_clients
@@ -743,13 +753,17 @@ async def broadcast_camera_list_to_viewers(depth_server: CloudDepthServer):
                 except Exception as e:
                     print(f"⚠️  Failed to send camera list to viewer {viewer_id}: {e}")
 
-        print(f"📡 Broadcast camera list to {len(viewer_clients)} viewers: {len(camera_list)} cameras")
+        print(
+            f"📡 Broadcast camera list to {len(viewer_clients)} viewers: {len(camera_list)} cameras"
+        )
 
     except Exception as e:
         print(f"❌ Error broadcasting camera list: {e}")
 
 
-async def process_multiview_frames(aligned_frames: List[TimestampedFrame], depth_server: CloudDepthServer):
+async def process_multiview_frames(
+    aligned_frames: List[TimestampedFrame], depth_server: CloudDepthServer
+):
     """Process aligned frames (single-view or multi-view) and send to all viewers"""
     try:
         # Convert JPEG bytes to RGB numpy arrays
@@ -768,15 +782,15 @@ async def process_multiview_frames(aligned_frames: List[TimestampedFrame], depth
             # Single-view mode
             print(f"📹 Processing single-view frame...")
             points, colors, intrinsics = await asyncio.to_thread(
-                depth_server.process_frame_to_pointcloud,
-                rgb_images[0]
+                depth_server.process_frame_to_pointcloud, rgb_images[0]
             )
         else:
             # Multi-view mode
-            print(f"🎥 Processing {len(rgb_images)} aligned views (time spread: {time_spread:.1f}ms)...")
+            print(
+                f"🎥 Processing {len(rgb_images)} aligned views (time spread: {time_spread:.1f}ms)..."
+            )
             points, colors, intrinsics = await asyncio.to_thread(
-                depth_server.process_multiview_to_pointcloud,
-                rgb_images
+                depth_server.process_multiview_to_pointcloud, rgb_images
             )
 
         # Pack point cloud data
@@ -806,6 +820,7 @@ async def process_multiview_frames(aligned_frames: List[TimestampedFrame], depth
     except Exception as e:
         print(f"❌ Error processing frames: {e}")
         import traceback
+
         traceback.print_exc()
 
 
