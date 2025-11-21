@@ -82,18 +82,27 @@ class DepthProcessor(VideoStreamTrack):
         """Actively consume and process frames with skipping"""
         print(f"🎬 Starting process_frames loop")
         skipped = 0
+        frames_received = 0
+
         while True:
             try:
                 # Always consume frames to prevent queue buildup
-                print(f"⏳ Waiting for frame from track...")
-                frame = await self.track.recv()
-                print(f"✅ Received frame!")
+                # Add timeout to prevent indefinite hanging
+                if frames_received == 0:
+                    print(f"⏳ Waiting for first frame from track...")
+
+                frame = await asyncio.wait_for(self.track.recv(), timeout=30.0)
+
+                if frames_received == 0:
+                    print(f"✅ First frame received! Stream is flowing.")
+
+                frames_received += 1
 
                 # Skip if still processing
                 if self.is_processing:
                     skipped += 1
                     if skipped % 30 == 0:
-                        print(f"⏭️  Skipped {skipped} frames")
+                        print(f"⏭️  Skipped {skipped} frames (total received: {frames_received})")
                     continue
 
                 skipped = 0
@@ -106,6 +115,10 @@ class DepthProcessor(VideoStreamTrack):
                 # Process in background (doesn't block frame consumption)
                 asyncio.create_task(self.process_frame_async(img))
 
+            except asyncio.TimeoutError:
+                print(f"⏱️  Timeout waiting for frame (waited 30s, received {frames_received} frames total)")
+                print(f"💡 This usually means ICE connection failed to establish media path")
+                break
             except Exception as e:
                 print(f"❌ Error in frame loop: {e}")
                 import traceback
@@ -235,8 +248,27 @@ async def websocket_endpoint(websocket: WebSocket):
     client_id = id(websocket)
     print(f"👤 Client {client_id} connected")
 
-    pc = RTCPeerConnection()
+    # Configure STUN servers for NAT traversal
+    pc = RTCPeerConnection(configuration={
+        "iceServers": [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+        ]
+    })
     depth_server.pcs.add(pc)
+
+    # Monitor ICE connection state
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        print(f"🔌 ICE connection state: {pc.connectionState}")
+        if pc.connectionState == "failed":
+            print(f"❌ ICE connection failed - check firewall/NAT settings")
+        elif pc.connectionState == "connected":
+            print(f"✅ Media connection established!")
+
+    @pc.on("iceconnectionstatechange")
+    async def on_iceconnectionstatechange():
+        print(f"🧊 ICE state: {pc.iceConnectionState}")
 
     @pc.on("track")
     async def on_track(track):

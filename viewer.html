@@ -315,13 +315,30 @@
               pc.addTrack(track, stream);
             });
 
+            // Monitor ICE connection state
+            pc.onconnectionstatechange = () => {
+              console.log("🔌 ICE connection state:", pc.connectionState);
+              if (pc.connectionState === "connected") {
+                console.log("✅ Media connection established!");
+              } else if (pc.connectionState === "failed") {
+                console.error("❌ ICE connection failed - check network/firewall");
+              }
+            };
+
+            pc.oniceconnectionstatechange = () => {
+              console.log("🧊 ICE state:", pc.iceConnectionState);
+            };
+
             // Handle ICE candidates
             pc.onicecandidate = (event) => {
               if (event.candidate) {
+                console.log("📤 Sending ICE candidate:", event.candidate.type);
                 ws.send(JSON.stringify({
                   type: "ice",
                   candidate: event.candidate
                 }));
+              } else {
+                console.log("✅ All ICE candidates sent");
               }
             };
 
